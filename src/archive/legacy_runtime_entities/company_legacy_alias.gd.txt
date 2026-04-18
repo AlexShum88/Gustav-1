@@ -1,0 +1,5 @@
+class_name Company
+extends CombatStand
+
+# Archived compatibility alias from the pre-stand runtime.
+# Runtime now uses CombatStand directly.

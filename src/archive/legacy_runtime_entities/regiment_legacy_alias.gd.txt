@@ -1,0 +1,5 @@
+class_name Regiment
+extends Battalion
+
+# Archived compatibility alias from the pre-battalion runtime.
+# Runtime now uses Battalion directly.

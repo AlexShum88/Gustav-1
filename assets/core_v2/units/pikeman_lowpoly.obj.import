@@ -1,0 +1,25 @@
+[remap]
+
+importer="wavefront_obj"
+importer_version=1
+type="Mesh"
+uid="uid://bkaq40jocy608"
+path="res://.godot/imported/pikeman_lowpoly.obj-bbae8d3646f51c98282b0e480086802b.mesh"
+
+[deps]
+
+files=["res://.godot/imported/pikeman_lowpoly.obj-bbae8d3646f51c98282b0e480086802b.mesh"]
+
+source_file="res://assets/core_v2/units/pikeman_lowpoly.obj"
+dest_files=["res://.godot/imported/pikeman_lowpoly.obj-bbae8d3646f51c98282b0e480086802b.mesh", "res://.godot/imported/pikeman_lowpoly.obj-bbae8d3646f51c98282b0e480086802b.mesh"]
+
+[params]
+
+generate_tangents=true
+generate_lods=true
+generate_shadow_mesh=true
+generate_lightmap_uv2=false
+generate_lightmap_uv2_texel_size=0.2
+scale_mesh=Vector3(1, 1, 1)
+offset_mesh=Vector3(0, 0, 0)
+force_disable_mesh_compression=false
