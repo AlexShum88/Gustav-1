@@ -12,6 +12,7 @@ enum CommandType {
 	PLACE_BAGGAGE,
 	PLACE_COMMANDER,
 	ISSUE_BRIGADE_ORDER,
+	ISSUE_BATTALION_ORDER,
 	START_BATTLE,
 	DEBUG_FORCE_FORMATION,
 }
@@ -52,6 +53,7 @@ enum FormationState {
 	TERCIA,
 	COLUMN,
 	MARCH_COLUMN,
+	DISORDERED_MASS,
 }
 
 enum UnitStatus {
@@ -67,6 +69,32 @@ enum MessengerStatus {
 	EN_ROUTE,
 	DELIVERED,
 	INTERCEPTED,
+}
+
+enum OrderSource {
+	NONE,
+	BRIGADE,
+	BATTALION_OVERRIDE,
+	SCRIPTED,
+	SELF_PRESERVATION,
+}
+
+enum FireDoctrine {
+	SALVO,
+	ROLLING_FIRE,
+	COUNTERMARCH,
+	IRREGULAR_FIRE,
+}
+
+enum MeleeCommitmentState {
+	NONE,
+	APPROACH,
+	COMMITMENT_CHECK,
+	IMPACT,
+	PRESS,
+	RECOIL,
+	BREAKTHROUGH,
+	DISENGAGE,
 }
 
 enum TerrainType {
@@ -87,7 +115,7 @@ static func battle_phase_name(value: int) -> String:
 		BattlePhase.DEPLOYMENT:
 			return "Активна пауза"
 		BattlePhase.ACTIVE:
-			return "Битва"
+			return "Бій"
 		BattlePhase.RESOLVED:
 			return "Завершено"
 		_:
@@ -97,15 +125,17 @@ static func battle_phase_name(value: int) -> String:
 static func command_type_name(value: int) -> String:
 	match value:
 		CommandType.PLACE_BAGGAGE:
-			return "Розміщення обозу"
+			return "Розмістити обоз"
 		CommandType.PLACE_COMMANDER:
-			return "Розміщення полководця"
+			return "Розмістити полководця"
 		CommandType.ISSUE_BRIGADE_ORDER:
 			return "Наказ бригаді"
+		CommandType.ISSUE_BATTALION_ORDER:
+			return "Наказ батальйону"
 		CommandType.START_BATTLE:
-			return "Початок битви"
+			return "Почати бій"
 		CommandType.DEBUG_FORCE_FORMATION:
-			return "Debug: примусова формація"
+			return "Debug-стрій"
 		_:
 			return "Невідома команда"
 
@@ -119,13 +149,13 @@ static func order_type_name(value: int) -> String:
 		OrderType.ATTACK:
 			return "Атака"
 		OrderType.MELEE_ASSAULT:
-			return "Рукопашна атака"
+			return "Рукопашний штурм"
 		OrderType.DEFEND:
 			return "Оборона"
 		OrderType.PATROL:
 			return "Патруль"
 		OrderType.HOLD:
-			return "Утримання"
+			return "Утримувати"
 		_:
 			return "Без наказу"
 
@@ -137,11 +167,11 @@ static func entity_kind_name(value: int) -> String:
 		EntityKind.BRIGADE_HQ:
 			return "Штаб бригади"
 		EntityKind.ARMY_HQ:
-			return "Штаб полководця"
+			return "Штаб армії"
 		EntityKind.BAGGAGE_TRAIN:
 			return "Обоз"
 		EntityKind.OBJECTIVE:
-			return "Стратегічний пункт"
+			return "Пункт"
 		EntityKind.MESSENGER:
 			return "Гінець"
 		_:
@@ -174,6 +204,8 @@ static func formation_state_name(value: int) -> String:
 			return "Колона"
 		FormationState.MARCH_COLUMN:
 			return "Маршева колона"
+		FormationState.DISORDERED_MASS:
+			return "Змішана маса"
 		_:
 			return "Лінія"
 
@@ -181,11 +213,11 @@ static func formation_state_name(value: int) -> String:
 static func unit_status_name(value: int) -> String:
 	match value:
 		UnitStatus.STAGING:
-			return "Очікує розгортання"
+			return "Розгортання"
 		UnitStatus.MOVING:
 			return "Рухається"
 		UnitStatus.HOLDING:
-			return "Утримує позицію"
+			return "Утримує"
 		UnitStatus.ENGAGING:
 			return "В бою"
 		UnitStatus.ROUTING:
@@ -197,11 +229,57 @@ static func unit_status_name(value: int) -> String:
 static func messenger_status_name(value: int) -> String:
 	match value:
 		MessengerStatus.DELIVERED:
-			return "Доставив наказ"
+			return "Доставлено"
 		MessengerStatus.INTERCEPTED:
-			return "Перехоплений"
+			return "Перехоплено"
 		_:
-			return "Везе наказ"
+			return "В дорозі"
+
+
+static func order_source_name(value: int) -> String:
+	match value:
+		OrderSource.BRIGADE:
+			return "Бригада"
+		OrderSource.BATTALION_OVERRIDE:
+			return "Прямий наказ"
+		OrderSource.SCRIPTED:
+			return "Сценарій"
+		OrderSource.SELF_PRESERVATION:
+			return "Самозбереження"
+		_:
+			return "Немає"
+
+
+static func fire_doctrine_name(value: int) -> String:
+	match value:
+		FireDoctrine.ROLLING_FIRE:
+			return "Почерговий вогонь"
+		FireDoctrine.COUNTERMARCH:
+			return "Контрмарш"
+		FireDoctrine.IRREGULAR_FIRE:
+			return "Безладний вогонь"
+		_:
+			return "Залп"
+
+
+static func melee_commitment_state_name(value: int) -> String:
+	match value:
+		MeleeCommitmentState.APPROACH:
+			return "Зближення"
+		MeleeCommitmentState.COMMITMENT_CHECK:
+			return "Перевірка рішучості"
+		MeleeCommitmentState.IMPACT:
+			return "Удар"
+		MeleeCommitmentState.PRESS:
+			return "Тиск"
+		MeleeCommitmentState.RECOIL:
+			return "Відкат"
+		MeleeCommitmentState.BREAKTHROUGH:
+			return "Прорив"
+		MeleeCommitmentState.DISENGAGE:
+			return "Вихід з бою"
+		_:
+			return "Немає"
 
 
 static func terrain_type_name(value: int) -> String:

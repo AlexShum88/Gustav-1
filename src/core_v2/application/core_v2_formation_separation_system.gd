@@ -5,10 +5,12 @@ extends RefCounted
 const ITERATIONS: int = 2
 const FOOTPRINT_PADDING_M: float = 9.0
 const MIN_CAPSULE_RADIUS_M: float = 16.0
-const MAX_PUSH_PER_PAIR_M: float = 12.0
-const MAX_PUSH_PER_TICK_M: float = 24.0
-const ENEMY_PUSH_STRENGTH: float = 1.0
-const FRIENDLY_PUSH_STRENGTH: float = 0.35
+const MAX_FRIENDLY_PUSH_PER_PAIR_M: float = 5.0
+const MAX_FRIENDLY_PUSH_PER_TICK_M: float = 10.0
+const FRIENDLY_PUSH_STRENGTH: float = 0.22
+const ENEMY_ANTI_INTERPENETRATION_PUSH_M: float = 2.8
+const MAX_RECOIL_PER_TICK_M: float = 14.0
+const RECOIL_CONTEST_MARGIN: float = 0.08
 
 
 static func update_formation_separation(state: CoreV2BattleState, delta: float) -> void:
@@ -19,11 +21,11 @@ static func update_formation_separation(state: CoreV2BattleState, delta: float) 
 		return
 	for battalion_value in battalions:
 		var battalion: CoreV2Battalion = battalion_value
-		battalion.separation_contacts = 0
-		battalion.separation_push_m = 0.0
+		battalion.reset_contact_state()
 	for _iteration in range(ITERATIONS):
 		var footprints: Dictionary = _build_footprints(state, battalions)
-		var pushes: Dictionary = {}
+		var friendly_pushes: Dictionary = {}
+		var recoils: Dictionary = {}
 		for first_index in range(battalions.size()):
 			var first: CoreV2Battalion = battalions[first_index]
 			var first_footprint: Dictionary = footprints.get(first.id, {})
@@ -36,11 +38,11 @@ static func update_formation_separation(state: CoreV2BattleState, delta: float) 
 				var second_footprint: Dictionary = footprints.get(second.id, {})
 				if second_footprint.is_empty():
 					continue
-				var push_data: Dictionary = _resolve_pair_push(first_footprint, second_footprint)
-				if push_data.is_empty():
+				var contact_data: Dictionary = _resolve_pair_contact(first_footprint, second_footprint)
+				if contact_data.is_empty():
 					continue
-				_accumulate_pair_push(pushes, first, second, push_data)
-		_apply_pushes(state, battalions, pushes)
+				_accumulate_pair_response(state, friendly_pushes, recoils, first, second, contact_data)
+		_apply_motion_responses(state, battalions, friendly_pushes, recoils)
 
 
 static func _collect_battalions(state: CoreV2BattleState) -> Array:
@@ -49,7 +51,7 @@ static func _collect_battalions(state: CoreV2BattleState) -> Array:
 		var battalion: CoreV2Battalion = battalion_value
 		if battalion == null or battalion.status == CoreV2Types.UnitStatus.STAGING:
 			continue
-		if battalion.soldiers_total <= 0 or battalion.sprite_count <= 0:
+		if battalion.soldiers_total <= 0:
 			continue
 		battalion.ensure_formation_ready()
 		battalion.sync_sprite_blocks(state)
@@ -58,7 +60,8 @@ static func _collect_battalions(state: CoreV2BattleState) -> Array:
 
 
 static func _should_ignore_pair(first: CoreV2Battalion, second: CoreV2Battalion) -> bool:
-	return first.army_id == second.army_id and first.brigade_id == second.brigade_id
+	# Батальйони однієї бригади теж мають фронтове тертя; інакше вони можуть проходити один крізь одного.
+	return first.id == second.id
 
 
 static func _build_footprints(state: CoreV2BattleState, battalions: Array) -> Dictionary:
@@ -87,8 +90,10 @@ static func _build_footprint(state: CoreV2BattleState, battalion: CoreV2Battalio
 		facing = Vector3.FORWARD
 	facing = facing.normalized()
 	var side := Vector3(-facing.z, 0.0, facing.x).normalized()
-	var half_width: float = max(FOOTPRINT_PADDING_M, (max_x - min_x) * 0.5 + FOOTPRINT_PADDING_M)
-	var capsule_radius: float = max(MIN_CAPSULE_RADIUS_M, (max_z - min_z) * 0.5 + FOOTPRINT_PADDING_M)
+	var measured_width: float = max(battalion.formation_frontage_m, max_x - min_x)
+	var measured_depth: float = max(battalion.formation_depth_m, max_z - min_z)
+	var half_width: float = max(FOOTPRINT_PADDING_M, measured_width * 0.5 + FOOTPRINT_PADDING_M)
+	var capsule_radius: float = max(MIN_CAPSULE_RADIUS_M, measured_depth * 0.5 + FOOTPRINT_PADDING_M)
 	var local_center := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
 	var center: Vector3 = battalion.position + side * local_center.x + facing * local_center.z
 	center.y = state.get_height_at(center)
@@ -101,10 +106,13 @@ static func _build_footprint(state: CoreV2BattleState, battalion: CoreV2Battalio
 		"segment_end": end_2d,
 		"capsule_radius": capsule_radius,
 		"broad_radius": half_width + capsule_radius,
+		"half_width": half_width,
+		"facing": Vector2(facing.x, facing.z),
+		"side": Vector2(side.x, side.z),
 	}
 
 
-static func _resolve_pair_push(first_footprint: Dictionary, second_footprint: Dictionary) -> Dictionary:
+static func _resolve_pair_contact(first_footprint: Dictionary, second_footprint: Dictionary) -> Dictionary:
 	var first_center: Vector2 = first_footprint.get("center", Vector2.ZERO)
 	var second_center: Vector2 = second_footprint.get("center", Vector2.ZERO)
 	var broad_radius: float = float(first_footprint.get("broad_radius", 0.0)) + float(second_footprint.get("broad_radius", 0.0))
@@ -128,19 +136,43 @@ static func _resolve_pair_push(first_footprint: Dictionary, second_footprint: Di
 	if direction.length_squared() <= 0.001:
 		direction = Vector2(1.0, 0.0)
 	direction = direction.normalized()
+	var first_side: Vector2 = first_footprint.get("side", Vector2.RIGHT)
+	var second_side: Vector2 = second_footprint.get("side", Vector2.RIGHT)
+	var first_lateral: float = absf((second_center - first_center).dot(first_side.normalized()))
+	var second_lateral: float = absf((first_center - second_center).dot(second_side.normalized()))
+	var first_half_width: float = max(1.0, float(first_footprint.get("half_width", 1.0)))
+	var second_half_width: float = max(1.0, float(second_footprint.get("half_width", 1.0)))
+	var frontage_ratio: float = clamp(1.0 - ((first_lateral + second_lateral) * 0.5 / max(1.0, (first_half_width + second_half_width) * 0.5)), 0.0, 1.0)
 	return {
 		"direction": direction,
 		"penetration_m": desired_distance - distance_m,
+		"desired_distance_m": desired_distance,
+		"frontage_ratio": frontage_ratio,
+		"overlap_left": max(0.0, 1.0 - first_lateral / first_half_width),
+		"overlap_right": max(0.0, 1.0 - second_lateral / second_half_width),
 	}
 
 
-static func _accumulate_pair_push(pushes: Dictionary, first: CoreV2Battalion, second: CoreV2Battalion, push_data: Dictionary) -> void:
-	var direction: Vector2 = push_data.get("direction", Vector2.ZERO)
-	var penetration_m: float = float(push_data.get("penetration_m", 0.0))
+static func _accumulate_pair_response(
+		state: CoreV2BattleState,
+		friendly_pushes: Dictionary,
+		recoils: Dictionary,
+		first: CoreV2Battalion,
+		second: CoreV2Battalion,
+		contact_data: Dictionary
+) -> void:
+	var direction: Vector2 = contact_data.get("direction", Vector2.ZERO)
+	var penetration_m: float = float(contact_data.get("penetration_m", 0.0))
 	if penetration_m <= 0.0:
 		return
-	var push_strength: float = FRIENDLY_PUSH_STRENGTH if first.army_id == second.army_id else ENEMY_PUSH_STRENGTH
-	var push_amount: float = min(MAX_PUSH_PER_PAIR_M, penetration_m * 0.42 * push_strength)
+	if first.army_id == second.army_id:
+		_accumulate_friendly_push(friendly_pushes, first, second, direction, penetration_m)
+		return
+	_accumulate_enemy_contact(state, friendly_pushes, recoils, first, second, direction, penetration_m, contact_data)
+
+
+static func _accumulate_friendly_push(pushes: Dictionary, first: CoreV2Battalion, second: CoreV2Battalion, direction: Vector2, penetration_m: float) -> void:
+	var push_amount: float = min(MAX_FRIENDLY_PUSH_PER_PAIR_M, penetration_m * FRIENDLY_PUSH_STRENGTH)
 	if push_amount <= 0.0:
 		return
 	var first_mass: float = _resolve_battalion_mass(first)
@@ -150,8 +182,100 @@ static func _accumulate_pair_push(pushes: Dictionary, first: CoreV2Battalion, se
 	var second_share: float = first_mass / total_mass
 	_add_push(pushes, first.id, -direction * push_amount * first_share)
 	_add_push(pushes, second.id, direction * push_amount * second_share)
-	first.separation_contacts += 1
-	second.separation_contacts += 1
+	first.separation_push_m += push_amount * first_share
+	second.separation_push_m += push_amount * second_share
+
+
+static func _accumulate_enemy_contact(
+		state: CoreV2BattleState,
+		friendly_pushes: Dictionary,
+		recoils: Dictionary,
+		first: CoreV2Battalion,
+		second: CoreV2Battalion,
+		direction: Vector2,
+		penetration_m: float,
+		contact_data: Dictionary
+) -> void:
+	var desired_distance_m: float = max(1.0, float(contact_data.get("desired_distance_m", 1.0)))
+	var compression: float = clamp(penetration_m / desired_distance_m, 0.0, 1.0)
+	var frontage_ratio: float = float(contact_data.get("frontage_ratio", 0.0))
+	var contact_pressure: float = clamp(compression * (0.45 + frontage_ratio * 0.65), 0.0, 1.0)
+	var is_frontal: bool = _is_frontal_contact(first, second, direction)
+	var first_score: float = _resolve_contact_staying_score(state, first)
+	var second_score: float = _resolve_contact_staying_score(state, second)
+	var score_total: float = max(1.0, first_score + second_score)
+	var first_recoil_risk: float = clamp((second_score - first_score) / score_total + contact_pressure * 0.45 + first.disorder * 0.18, 0.0, 1.0)
+	var second_recoil_risk: float = clamp((first_score - second_score) / score_total + contact_pressure * 0.45 + second.disorder * 0.18, 0.0, 1.0)
+
+	first.register_tactical_contact(
+		second.id,
+		Vector3(-direction.x, 0.0, -direction.y),
+		frontage_ratio,
+		float(contact_data.get("overlap_left", 0.0)),
+		float(contact_data.get("overlap_right", 0.0)),
+		compression,
+		contact_pressure,
+		first_recoil_risk,
+		is_frontal
+	)
+	second.register_tactical_contact(
+		first.id,
+		Vector3(direction.x, 0.0, direction.y),
+		frontage_ratio,
+		float(contact_data.get("overlap_right", 0.0)),
+		float(contact_data.get("overlap_left", 0.0)),
+		compression,
+		contact_pressure,
+		second_recoil_risk,
+		is_frontal
+	)
+
+	if is_frontal:
+		_accumulate_recoil_if_contest_lost(recoils, first, second, direction, first_score, second_score, compression, contact_pressure)
+	elif compression > 0.26:
+		var emergency_push: float = min(ENEMY_ANTI_INTERPENETRATION_PUSH_M, penetration_m * 0.12)
+		_add_push(friendly_pushes, first.id, -direction * emergency_push)
+		_add_push(friendly_pushes, second.id, direction * emergency_push)
+
+
+static func _accumulate_recoil_if_contest_lost(
+		recoils: Dictionary,
+		first: CoreV2Battalion,
+		second: CoreV2Battalion,
+		direction: Vector2,
+		first_score: float,
+		second_score: float,
+		compression: float,
+		contact_pressure: float
+) -> void:
+	var score_total: float = max(1.0, first_score + second_score)
+	var normalized_advantage: float = absf(first_score - second_score) / score_total
+	if normalized_advantage < RECOIL_CONTEST_MARGIN and contact_pressure < 0.46:
+		return
+	var recoil_amount: float = min(MAX_RECOIL_PER_TICK_M, 2.0 + compression * 7.0 + normalized_advantage * 14.0)
+	if first_score < second_score:
+		_add_push(recoils, first.id, -direction * recoil_amount)
+		first.melee_commitment_state = CoreV2Types.MeleeCommitmentState.RECOIL
+	else:
+		_add_push(recoils, second.id, direction * recoil_amount)
+		second.melee_commitment_state = CoreV2Types.MeleeCommitmentState.RECOIL
+
+
+static func _is_frontal_contact(first: CoreV2Battalion, second: CoreV2Battalion, direction: Vector2) -> bool:
+	var first_facing := Vector2(first.facing.x, first.facing.z)
+	var second_facing := Vector2(second.facing.x, second.facing.z)
+	if first_facing.length_squared() <= 0.001 or second_facing.length_squared() <= 0.001:
+		return true
+	first_facing = first_facing.normalized()
+	second_facing = second_facing.normalized()
+	return first_facing.dot(direction) > 0.12 and second_facing.dot(-direction) > 0.12
+
+
+static func _resolve_contact_staying_score(state: CoreV2BattleState, battalion: CoreV2Battalion) -> float:
+	var staying_power: float = CoreV2BattalionCombatModel.resolve_staying_power(state, battalion)
+	var melee_power: float = CoreV2BattalionCombatModel.resolve_melee_output(battalion)
+	var reform_penalty: float = 0.72 if battalion.is_reforming else 1.0
+	return max(1.0, (staying_power + melee_power * 0.42) * reform_penalty)
 
 
 static func _resolve_battalion_mass(battalion: CoreV2Battalion) -> float:
@@ -164,24 +288,42 @@ static func _add_push(pushes: Dictionary, battalion_id: StringName, push: Vector
 	pushes[battalion_id] = current_push + push
 
 
-static func _apply_pushes(state: CoreV2BattleState, battalions: Array, pushes: Dictionary) -> void:
+static func _apply_motion_responses(state: CoreV2BattleState, battalions: Array, friendly_pushes: Dictionary, recoils: Dictionary) -> void:
 	for battalion_value in battalions:
 		var battalion: CoreV2Battalion = battalion_value
-		var push: Vector2 = pushes.get(battalion.id, Vector2.ZERO)
+		var push: Vector2 = friendly_pushes.get(battalion.id, Vector2.ZERO)
 		var push_length: float = push.length()
-		if push_length <= 0.001:
+		if push_length > MAX_FRIENDLY_PUSH_PER_TICK_M:
+			push = push.normalized() * MAX_FRIENDLY_PUSH_PER_TICK_M
+			push_length = MAX_FRIENDLY_PUSH_PER_TICK_M
+		var recoil: Vector2 = recoils.get(battalion.id, Vector2.ZERO)
+		var recoil_length: float = recoil.length()
+		if recoil_length > MAX_RECOIL_PER_TICK_M:
+			recoil = recoil.normalized() * MAX_RECOIL_PER_TICK_M
+			recoil_length = MAX_RECOIL_PER_TICK_M
+		var total_motion: Vector2 = push + recoil
+		var total_length: float = total_motion.length()
+		if total_length <= 0.001:
 			continue
-		if push_length > MAX_PUSH_PER_TICK_M:
-			push = push.normalized() * MAX_PUSH_PER_TICK_M
-			push_length = MAX_PUSH_PER_TICK_M
 		var pressure_direction := Vector3(push.x, 0.0, push.y)
+		if recoil_length > 0.001:
+			pressure_direction = Vector3(recoil.x, 0.0, recoil.y)
 		if pressure_direction.length_squared() > 0.001:
 			battalion.formation_pressure_direction = pressure_direction.normalized()
-			battalion.formation_pressure_m = max(battalion.formation_pressure_m, push_length)
-		battalion.position.x += push.x
-		battalion.position.z += push.y
+			battalion.formation_pressure_m = max(battalion.formation_pressure_m, total_length)
+		battalion.position.x += total_motion.x
+		battalion.position.z += total_motion.y
 		battalion.position = state.project_position_to_terrain(battalion.position)
-		battalion.separation_push_m += push_length
+		battalion.separation_push_m += total_length
+		if recoil_length > 0.001:
+			CoreV2BattalionCombatModel.apply_functional_loss(
+				battalion,
+				recoil_length * 0.0016,
+				recoil_length * 0.0011,
+				0.0,
+				recoil_length * 0.0028,
+				recoil_length * 0.0024
+			)
 		battalion.sync_sprite_blocks(state)
 
 

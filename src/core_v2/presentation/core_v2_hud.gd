@@ -146,7 +146,7 @@ func _build_battalion_selection_summary(selected_battalion: Dictionary) -> Dicti
 		float(selected_battalion.get("formation_progress", 1.0)) * 100.0,
 		selected_battalion.get("commander_name", ""),
 		int(selected_battalion.get("soldiers_total", 0)),
-		int(selected_battalion.get("sprite_count", 0)),
+		int(selected_battalion.get("visible_strength_estimate", selected_battalion.get("soldiers_total", 0))),
 		float(selected_battalion.get("cohesion", 0.0)) * 100.0,
 		float(selected_battalion.get("ammunition", 0.0)) * 100.0,
 		float(selected_battalion.get("forage", 0.0)) * 100.0,
@@ -175,12 +175,19 @@ func _build_battalion_selection_summary(selected_battalion: Dictionary) -> Dicti
 			int(selected_battalion.get("separation_contacts", 0)),
 			float(selected_battalion.get("separation_push_m", 0.0)),
 		]
+	if bool(selected_battalion.get("is_in_contact", false)):
+		selection_body += "\nContact: frontage %.0f%% | pressure %.0f%% | compression %.0f%% | recoil %.0f%%" % [
+			float(selected_battalion.get("contact_frontage_ratio", 0.0)) * 100.0,
+			float(selected_battalion.get("contact_pressure", 0.0)) * 100.0,
+			float(selected_battalion.get("compression_level", 0.0)) * 100.0,
+			float(selected_battalion.get("recoil_tendency", 0.0)) * 100.0,
+		]
 	if not String(selected_battalion.get("combat_target_name", "")).is_empty():
 		var combat_kind: String = String(selected_battalion.get("combat_attack_kind", ""))
 		var combat_kind_label: String = _combat_attack_kind_label(combat_kind)
 		var melee_suffix: String = ""
 		if combat_kind == "melee":
-			melee_suffix = " | melee blocks %d" % int(selected_battalion.get("combat_melee_blocks", 0))
+			melee_suffix = " | commitment %s" % String(selected_battalion.get("melee_commitment_label", ""))
 		selection_body += "\nБій: %s %.0f м | %s | втрати +%d / -%d | reload %.1f%s" % [
 			selected_battalion.get("combat_target_name", ""),
 			float(selected_battalion.get("combat_range_m", 0.0)),
@@ -288,17 +295,9 @@ func _build_performance_text(performance_stats: Dictionary) -> String:
 		int(performance_stats.get("battalion_nodes", 0)),
 		_get_performance_max_int("battalion_nodes"),
 	])
-	lines.append("Sprite blocks %d / max %d" % [
-		int(performance_stats.get("sprite_blocks", 0)),
-		_get_performance_max_int("sprite_blocks"),
-	])
-	lines.append("Unit models %d / max %d" % [
-		int(performance_stats.get("unit_model_instances", 0)),
-		_get_performance_max_int("unit_model_instances"),
-	])
-	lines.append("Unit MultiMesh %d / max %d" % [
-		int(performance_stats.get("unit_multimeshes", 0)),
-		_get_performance_max_int("unit_multimeshes"),
+	lines.append("Battalion footprints %d / max %d" % [
+		int(performance_stats.get("battalion_footprints", 0)),
+		_get_performance_max_int("battalion_footprints"),
 	])
 	lines.append("Route waypoints %d / max %d" % [
 		int(performance_stats.get("route_waypoints", 0)),
@@ -340,14 +339,6 @@ func _build_performance_text(performance_stats: Dictionary) -> String:
 		int(performance_stats.get("mesh_cache", 0)),
 		_get_performance_max_int("mesh_cache"),
 	])
-	lines.append("Sprite pool %d / max %d" % [
-		int(performance_stats.get("sprite_pool", 0)),
-		_get_performance_max_int("sprite_pool"),
-	])
-	lines.append("Sprites created %d / max %d" % [
-		int(performance_stats.get("sprite_blocks_created", 0)),
-		_get_performance_max_int("sprite_blocks_created"),
-	])
 	return "\n".join(lines)
 
 
@@ -367,9 +358,7 @@ func _update_performance_extremes(performance_stats: Dictionary, can_record_extr
 		"selection_overlay_nodes",
 		"selection_overlay_rebuilds",
 		"battalion_nodes",
-		"sprite_blocks",
-		"unit_model_instances",
-		"unit_multimeshes",
+		"battalion_footprints",
 		"route_waypoints",
 		"battalion_visuals",
 		"objective_visuals",
@@ -383,8 +372,6 @@ func _update_performance_extremes(performance_stats: Dictionary, can_record_extr
 		"objective_nodes",
 		"material_cache",
 		"mesh_cache",
-		"sprite_pool",
-		"sprite_blocks_created",
 	]
 	for metric_key_value in max_metric_keys:
 		var metric_key: String = String(metric_key_value)

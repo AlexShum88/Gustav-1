@@ -31,6 +31,10 @@ var hq_recent_damage: float = 0.0
 var ai_next_decision_time_seconds: float = 0.0
 var ai_last_focus_entity_id: StringName = &""
 var ai_last_order_target: Vector3 = Vector3.ZERO
+var detached_battalion_ids: Dictionary = {}
+var frontage_gap_ratio: float = 0.0
+var support_penalty: float = 0.0
+var line_stretch_ratio: float = 0.0
 
 
 func add_battalion(battalion: CoreV2Battalion) -> void:
@@ -55,6 +59,11 @@ func issue_order(order: CoreV2Order, policies: Dictionary = {}, terrain_state = 
 	var order_layout: Dictionary = _build_order_layout(order, desired_formations)
 	for battalion_index in range(battalions.size()):
 		var battalion: CoreV2Battalion = battalions[battalion_index]
+		if battalion.has_active_battalion_override(order.issued_at_seconds):
+			detached_battalion_ids[battalion.id] = true
+			continue
+		battalion.order_source = CoreV2Types.OrderSource.BRIGADE
+		detached_battalion_ids.erase(battalion.id)
 		var slot: Dictionary = order_layout.get(battalion.id, {})
 		var desired_formation: int = int(slot.get("formation_state", desired_formations.get(battalion.id, battalion.desired_formation_state)))
 		var formation_slot_offset: Vector3 = slot.get("slot_offset", Vector3.ZERO)
@@ -67,12 +76,44 @@ func issue_order(order: CoreV2Order, policies: Dictionary = {}, terrain_state = 
 		battalion.set_target(battalion_target, order, battalion_path, battalion_facing)
 
 
+func issue_battalion_override(
+		battalion_id: StringName,
+		order: CoreV2Order,
+		policies: Dictionary,
+		terrain_state,
+		current_time_seconds: float
+) -> bool:
+	var battalion: CoreV2Battalion = get_battalion(battalion_id)
+	if battalion == null or order == null:
+		return false
+	var target_position: Vector3 = _project_if_possible(order.target_position, terrain_state)
+	var battalion_path: Array = _plan_entity_path(battalion.position, target_position, battalion.category, order, terrain_state)
+	var desired_formation: int = CoreV2FormationSystem.choose_formation_for_order(battalion, order, policies)
+	var desired_facing: Vector3 = _resolve_override_facing(battalion, target_position)
+	var override_duration: float = float(policies.get("override_duration_seconds", 45.0))
+	battalion.request_formation(desired_formation)
+	battalion.issue_direct_override(order, target_position, battalion_path, desired_facing, current_time_seconds, override_duration)
+	detached_battalion_ids[battalion.id] = true
+	_update_frontage_integrity()
+	return true
+
+
+func get_battalion(battalion_id: StringName) -> CoreV2Battalion:
+	for battalion_value in battalions:
+		var battalion: CoreV2Battalion = battalion_value
+		if battalion.id == battalion_id:
+			return battalion
+	return null
+
+
 func advance(delta: float, terrain_state = null) -> void:
+	_refresh_detached_battalions(terrain_state)
 	_update_hq_follow_target(terrain_state)
 	_advance_hq(delta, terrain_state)
 	for battalion_value in battalions:
 		var battalion: CoreV2Battalion = battalion_value
 		battalion.advance(delta, terrain_state)
+	_update_frontage_integrity()
 
 
 func get_center_position() -> Vector3:
@@ -104,6 +145,10 @@ func create_snapshot() -> Dictionary:
 		"ai_next_decision_time_seconds": ai_next_decision_time_seconds,
 		"ai_last_focus_entity_id": String(ai_last_focus_entity_id),
 		"ai_last_order_target": ai_last_order_target,
+		"detached_battalion_ids": _stringify_detached_battalion_ids(),
+		"frontage_gap_ratio": frontage_gap_ratio,
+		"support_penalty": support_penalty,
+		"line_stretch_ratio": line_stretch_ratio,
 	}
 
 
@@ -187,6 +232,71 @@ func _arrive_hq_waypoint(terrain_state = null) -> void:
 	hq_position = hq_target_position
 	if terrain_state != null:
 		hq_position.y = terrain_state.get_height_at(hq_position)
+
+
+func _refresh_detached_battalions(terrain_state = null) -> void:
+	var changed: bool = false
+	var current_time_seconds: float = terrain_state.time_seconds if terrain_state != null else 0.0
+	for battalion_value in battalions:
+		var battalion: CoreV2Battalion = battalion_value
+		if battalion.order_source != CoreV2Types.OrderSource.BATTALION_OVERRIDE:
+			continue
+		if battalion.override_expires_at < 0.0:
+			detached_battalion_ids[battalion.id] = true
+			continue
+		if current_time_seconds < battalion.override_expires_at:
+			detached_battalion_ids[battalion.id] = true
+			continue
+		battalion.clear_battalion_override()
+		detached_battalion_ids.erase(battalion.id)
+		changed = true
+	if changed and current_order != null:
+		issue_order(current_order, order_policies, terrain_state)
+	_update_frontage_integrity()
+
+
+func _update_frontage_integrity() -> void:
+	if battalions.is_empty():
+		frontage_gap_ratio = 0.0
+		support_penalty = 0.0
+		line_stretch_ratio = 0.0
+		return
+	var detached_count: int = 0
+	var active_count: int = 0
+	var max_lateral_gap_m: float = 0.0
+	var brigade_forward: Vector3 = _resolve_brigade_forward(get_center_position())
+	var side: Vector3 = _side_from_facing(brigade_forward)
+	var lateral_positions: Array = []
+	for battalion_value in battalions:
+		var battalion: CoreV2Battalion = battalion_value
+		if battalion.status == CoreV2Types.UnitStatus.ROUTING:
+			continue
+		active_count += 1
+		if battalion.order_source == CoreV2Types.OrderSource.BATTALION_OVERRIDE:
+			detached_count += 1
+		lateral_positions.append(battalion.position.dot(side))
+	lateral_positions.sort()
+	for index in range(1, lateral_positions.size()):
+		max_lateral_gap_m = max(max_lateral_gap_m, absf(float(lateral_positions[index]) - float(lateral_positions[index - 1])))
+	frontage_gap_ratio = clamp(float(detached_count) / float(max(1, active_count)), 0.0, 1.0)
+	line_stretch_ratio = clamp((max_lateral_gap_m - BATTALION_MIN_SLOT_WIDTH_M) / max(1.0, BATTALION_MAX_FRONTAGE_M), 0.0, 1.0)
+	# Direct battalion micro creates a real brigade cost: gaps reduce adjacent support and line staying power.
+	support_penalty = clamp(frontage_gap_ratio * 0.65 + line_stretch_ratio * 0.35, 0.0, 1.0)
+
+
+func _resolve_override_facing(battalion: CoreV2Battalion, target_position: Vector3) -> Vector3:
+	var direction: Vector3 = target_position - battalion.position
+	direction.y = 0.0
+	if direction.length_squared() <= 0.001:
+		return battalion.facing
+	return direction.normalized()
+
+
+func _stringify_detached_battalion_ids() -> Array:
+	var result: Array = []
+	for battalion_id_value in detached_battalion_ids.keys():
+		result.append(String(battalion_id_value))
+	return result
 
 
 func _distance_2d(from_position: Vector3, to_position: Vector3) -> float:

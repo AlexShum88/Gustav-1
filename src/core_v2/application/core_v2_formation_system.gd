@@ -36,6 +36,7 @@ static func initialize_battalion(battalion: CoreV2Battalion) -> void:
 	battalion.sprite_reform_from_offsets = battalion.sprite_offsets.duplicate(true)
 	battalion.sprite_roles = layout.get("roles", []).duplicate(true)
 	battalion.formation_frontage_m = float(layout.get("frontage_m", requested_frontage_m))
+	battalion.formation_depth_m = float(layout.get("depth_m", battalion.formation_depth_m))
 	battalion.desired_formation_frontage_m = battalion.formation_frontage_m
 	battalion.formation_elapsed_seconds = 0.0
 	battalion.formation_duration_seconds = MIN_REFORM_DURATION_SECONDS
@@ -63,6 +64,7 @@ static func request_formation(battalion: CoreV2Battalion, next_formation_state: 
 
 	battalion.desired_formation_state = next_formation_state
 	battalion.desired_formation_frontage_m = float(next_layout.get("frontage_m", next_frontage_m))
+	battalion.formation_depth_m = float(next_layout.get("depth_m", battalion.formation_depth_m))
 	battalion.sprite_reform_from_offsets = battalion.sprite_offsets.duplicate(true)
 	battalion.sprite_target_offsets = next_offsets.duplicate(true)
 	battalion.sprite_roles = next_layout.get("roles", []).duplicate(true)
@@ -85,6 +87,7 @@ static func force_formation(battalion: CoreV2Battalion, next_formation_state: in
 	battalion.formation_state = next_formation_state
 	battalion.desired_formation_state = next_formation_state
 	battalion.formation_frontage_m = float(next_layout.get("frontage_m", requested_frontage_m))
+	battalion.formation_depth_m = float(next_layout.get("depth_m", battalion.formation_depth_m))
 	battalion.desired_formation_frontage_m = battalion.formation_frontage_m
 	battalion.sprite_offsets = next_offsets.duplicate(true)
 	battalion.sprite_offset_velocities = _build_zero_velocities(battalion.sprite_offsets.size())
@@ -114,6 +117,7 @@ static func advance_battalion(battalion: CoreV2Battalion, delta: float, terrain_
 		if battalion.formation_progress >= 1.0:
 			battalion.formation_state = battalion.desired_formation_state
 			battalion.formation_frontage_m = battalion.desired_formation_frontage_m
+			battalion.formation_depth_m = float(_measure_layout(battalion.sprite_target_offsets).get("depth_m", battalion.formation_depth_m))
 			battalion.sprite_offsets = battalion.sprite_target_offsets.duplicate(true)
 			battalion.sprite_reform_from_offsets = battalion.sprite_offsets.duplicate(true)
 			battalion.sprite_offset_velocities = _build_zero_velocities(battalion.sprite_offsets.size())

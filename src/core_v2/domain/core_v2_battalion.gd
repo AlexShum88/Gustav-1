@@ -30,6 +30,12 @@ var move_speed_mps: float = 32.0
 var vision_radius_m: float = 1500.0
 var commander: CoreV2Commander
 var current_order: CoreV2Order
+var order_source: int = CoreV2Types.OrderSource.BRIGADE
+var active_order: CoreV2Order
+var order_delay_remaining: float = 0.0
+var order_age: float = 0.0
+var override_expires_at: float = -1.0
+var inherits_brigade_intent_after_override: bool = true
 var movement_path: Array = []
 var combat_target_id: StringName = &""
 var combat_target_name: String = ""
@@ -40,6 +46,8 @@ var combat_attack_kind: String = ""
 var combat_melee_blocks: int = 0
 var recent_casualties_inflicted: int = 0
 var recent_casualties_taken: int = 0
+var fire_casualty_carry: float = 0.0
+var melee_casualty_carry: float = 0.0
 var recent_combat_event: String = ""
 var engagement_target_id: StringName = &""
 var engagement_mode: String = ""
@@ -51,6 +59,16 @@ var separation_contacts: int = 0
 var separation_push_m: float = 0.0
 var formation_pressure_direction: Vector3 = Vector3.ZERO
 var formation_pressure_m: float = 0.0
+var is_in_contact: bool = false
+var contact_frontage_ratio: float = 0.0
+var contact_overlap_left: float = 0.0
+var contact_overlap_right: float = 0.0
+var compression_level: float = 0.0
+var contact_pressure: float = 0.0
+var recoil_tendency: float = 0.0
+var alignment_loss_from_contact: float = 0.0
+var locked_in_melee: bool = false
+var contact_opponent_ids: Array = []
 var desired_formation_state: int = CoreV2Types.FormationState.LINE
 var formation_frontage_m: float = 0.0
 var desired_formation_frontage_m: float = 0.0
@@ -60,15 +78,46 @@ var sprite_target_offsets: Array = []
 var sprite_reform_from_offsets: Array = []
 var sprite_roles: Array = []
 var sprite_blocks: Array = []
+var legacy_sprite_blocks_enabled: bool = false
 var formation_elapsed_seconds: float = 0.0
 var formation_duration_seconds: float = 1.0
 var formation_progress: float = 1.0
 var is_reforming: bool = false
+var pike_strength: float = 360.0
+var shot_strength_left: float = 320.0
+var shot_strength_right: float = 320.0
+var shot_reserve_strength: float = 0.0
+var officer_quality: float = 0.72
+var drill_quality: float = 0.72
+var formation_depth_m: float = 0.0
+var alignment_score: float = 1.0
+var front_continuity: float = 1.0
+var depth_cohesion: float = 1.0
+var terrain_distortion: float = 0.0
+var interpenetration_stress: float = 0.0
+var morale: float = 0.86
+var fatigue: float = 0.0
+var disorder: float = 0.0
+var suppression: float = 0.0
+var ammo_state: float = 1.0
+var smoke_burden: float = 0.0
+var melee_commitment_state: int = CoreV2Types.MeleeCommitmentState.NONE
+var cavalry_threat_response: int = CoreV2Types.FormationState.DEFENSIVE
+var fire_doctrine: int = CoreV2Types.FireDoctrine.SALVO
+var reload_cycle_state: float = 0.0
+var volley_readiness: float = 1.0
+var road_contact_state: String = "offroad"
+var movement_state: String = "idle"
+var movement_strain: float = 0.0
+var visibility_profile: Dictionary = {}
+var last_engagement_id: StringName = &""
 
 
 func set_target(next_target: Vector3, order: CoreV2Order, next_movement_path: Array = [], next_facing: Vector3 = Vector3.ZERO) -> void:
 	target_position = next_target
 	current_order = order
+	active_order = order
+	order_age = 0.0
 	movement_path = _sanitize_movement_path(next_movement_path)
 	if next_facing.length_squared() > 0.001:
 		target_facing = next_facing.normalized()
@@ -81,7 +130,34 @@ func set_target(next_target: Vector3, order: CoreV2Order, next_movement_path: Ar
 	status = CoreV2Types.UnitStatus.MOVING
 
 
+func issue_direct_override(
+		order: CoreV2Order,
+		next_target: Vector3,
+		next_movement_path: Array,
+		next_facing: Vector3,
+		current_time_seconds: float,
+		override_duration_seconds: float
+) -> void:
+	order_source = CoreV2Types.OrderSource.BATTALION_OVERRIDE
+	override_expires_at = current_time_seconds + override_duration_seconds if override_duration_seconds > 0.0 else -1.0
+	inherits_brigade_intent_after_override = true
+	set_target(next_target, order, next_movement_path, next_facing)
+
+
+func has_active_battalion_override(current_time_seconds: float) -> bool:
+	if order_source != CoreV2Types.OrderSource.BATTALION_OVERRIDE:
+		return false
+	return override_expires_at < 0.0 or current_time_seconds < override_expires_at
+
+
+func clear_battalion_override() -> void:
+	if order_source == CoreV2Types.OrderSource.BATTALION_OVERRIDE:
+		order_source = CoreV2Types.OrderSource.BRIGADE
+	override_expires_at = -1.0
+
+
 func advance(delta: float, terrain_state = null) -> void:
+	order_age += delta
 	var position_2d := Vector2(position.x, position.z)
 	var active_target: Vector3 = _get_active_movement_target()
 	var target_2d := Vector2(active_target.x, active_target.z)
@@ -90,11 +166,13 @@ func advance(delta: float, terrain_state = null) -> void:
 		_arrive_at_active_waypoint(terrain_state)
 		_turn_toward_target_facing(delta, terrain_state)
 		CoreV2FormationSystem.advance_battalion(self, delta, terrain_state)
+		_update_battalion_condition(terrain_state, delta)
 		return
 
 	# Рух іде до активного waypoint; швидкість бере terrain/road multiplier із server-state.
 	var speed_multiplier: float = terrain_state.get_speed_multiplier_at(position, category) if terrain_state != null else 1.0
-	var step: float = min(distance_to_target, move_speed_mps * speed_multiplier * delta)
+	var contact_speed_multiplier: float = _resolve_contact_movement_multiplier(active_target)
+	var step: float = min(distance_to_target, move_speed_mps * speed_multiplier * contact_speed_multiplier * delta)
 	var movement_direction_2d: Vector2 = (target_2d - position_2d).normalized()
 	if movement_direction_2d.length_squared() > 0.0001 and engagement_target_id == &"":
 		turn_toward_facing(Vector3(movement_direction_2d.x, 0.0, movement_direction_2d.y), delta, speed_multiplier)
@@ -105,6 +183,7 @@ func advance(delta: float, terrain_state = null) -> void:
 	if step > 0.0 and status != CoreV2Types.UnitStatus.ROUTING:
 		status = CoreV2Types.UnitStatus.MOVING
 	CoreV2FormationSystem.advance_battalion(self, delta, terrain_state)
+	_update_battalion_condition(terrain_state, delta)
 
 
 func request_formation(next_formation_state: int, next_frontage_m: float = -1.0) -> void:
@@ -143,6 +222,12 @@ func ensure_formation_ready() -> void:
 
 
 func sync_sprite_blocks(terrain_state = null) -> void:
+	# Старий 50-man block шар залишено лише як опційний legacy/debug шлях.
+	# Авторитетна бойова логіка і основний клієнтський рендер працюють від стану батальйону.
+	if not legacy_sprite_blocks_enabled:
+		if not sprite_blocks.is_empty():
+			sprite_blocks.clear()
+		return
 	if sprite_offsets.size() != sprite_count or sprite_roles.size() != sprite_count:
 		return
 	_resize_sprite_blocks()
@@ -176,6 +261,7 @@ func get_sprite_world_position(sprite_index: int, terrain_state = null) -> Vecto
 
 func create_snapshot(player_army_id: StringName) -> Dictionary:
 	ensure_formation_ready()
+	var visual_state: Dictionary = create_visual_state()
 	return {
 		"id": String(id),
 		"army_id": String(army_id),
@@ -189,6 +275,7 @@ func create_snapshot(player_army_id: StringName) -> Dictionary:
 		"desired_formation_label": CoreV2Types.formation_state_name(desired_formation_state),
 		"formation_frontage_m": formation_frontage_m,
 		"desired_formation_frontage_m": desired_formation_frontage_m,
+		"formation_depth_m": formation_depth_m,
 		"is_reforming": is_reforming,
 		"formation_progress": formation_progress,
 		"status": status,
@@ -198,11 +285,28 @@ func create_snapshot(player_army_id: StringName) -> Dictionary:
 		"target_facing": target_facing,
 		"facing": facing,
 		"soldiers_total": soldiers_total,
-		"sprite_count": sprite_count,
+		"visible_strength_estimate": soldiers_total,
+		"pike_strength": pike_strength,
+		"shot_strength_left": shot_strength_left,
+		"shot_strength_right": shot_strength_right,
+		"pike_ratio": _safe_ratio(pike_strength, float(max(1, soldiers_total))),
+		"shot_ratio": _safe_ratio(shot_strength_left + shot_strength_right, float(max(1, soldiers_total))),
 		"cohesion": cohesion,
+		"morale": morale,
+		"fatigue": fatigue,
+		"disorder": disorder,
+		"suppression": suppression,
+		"alignment_score": alignment_score,
+		"front_continuity": front_continuity,
+		"depth_cohesion": depth_cohesion,
+		"terrain_distortion": terrain_distortion,
+		"interpenetration_stress": interpenetration_stress,
 		"ammunition": ammunition,
+		"ammo_state": ammo_state,
 		"forage": forage,
 		"training": training,
+		"drill_quality": drill_quality,
+		"officer_quality": officer_quality,
 		"move_speed_mps": move_speed_mps,
 		"vision_radius_m": vision_radius_m,
 		"terrain_speed_multiplier": 1.0,
@@ -223,20 +327,82 @@ func create_snapshot(player_army_id: StringName) -> Dictionary:
 		"engagement_desired_range_m": engagement_desired_range_m,
 		"engagement_target_lock_seconds": engagement_target_lock_seconds,
 		"engagement_formation_cooldown_seconds": engagement_formation_cooldown_seconds,
+		"last_engagement_id": String(last_engagement_id),
 		"separation_contacts": separation_contacts,
 		"separation_push_m": separation_push_m,
 		"formation_pressure_direction": formation_pressure_direction,
 		"formation_pressure_m": formation_pressure_m,
-		"sprite_block_targets": _create_sprite_block_target_snapshot(),
-		"sprite_offsets": sprite_offsets.duplicate(true),
-		"sprite_target_offsets": sprite_target_offsets.duplicate(true),
-		"sprite_roles": sprite_roles.duplicate(true),
+		"is_in_contact": is_in_contact,
+		"contact_frontage_ratio": contact_frontage_ratio,
+		"contact_overlap_left": contact_overlap_left,
+		"contact_overlap_right": contact_overlap_right,
+		"compression_level": compression_level,
+		"contact_pressure": contact_pressure,
+		"recoil_tendency": recoil_tendency,
+		"alignment_loss_from_contact": alignment_loss_from_contact,
+		"locked_in_melee": locked_in_melee,
+		"contact_opponent_ids": contact_opponent_ids.duplicate(),
+		"order_source": order_source,
+		"order_source_label": CoreV2Types.order_source_name(order_source),
+		"order_age": order_age,
+		"override_expires_at": override_expires_at,
+		"inherits_brigade_intent_after_override": inherits_brigade_intent_after_override,
+		"fire_doctrine": fire_doctrine,
+		"fire_doctrine_label": CoreV2Types.fire_doctrine_name(fire_doctrine),
+		"reload_cycle_state": reload_cycle_state,
+		"volley_readiness": volley_readiness,
+		"smoke_burden": smoke_burden,
+		"melee_commitment_state": melee_commitment_state,
+		"melee_commitment_label": CoreV2Types.melee_commitment_state_name(melee_commitment_state),
+		"movement_state": movement_state,
+		"movement_strain": movement_strain,
+		"road_contact_state": road_contact_state,
+		"visibility_profile": visibility_profile.duplicate(true),
+		"visual_state": visual_state,
 		"is_friendly": army_id == player_army_id,
 		"commander_name": commander.display_name if commander != null else "",
 		"order_label": CoreV2Types.order_type_name(
 			current_order.order_type if current_order != null else CoreV2Types.OrderType.NONE
 		),
 		"order_type": current_order.order_type if current_order != null else CoreV2Types.OrderType.NONE,
+	}
+
+
+func create_visual_state() -> Dictionary:
+	var width_m: float = max(36.0, formation_frontage_m)
+	var depth_m: float = max(24.0, formation_depth_m)
+	if width_m <= 36.0 or depth_m <= 24.0:
+		var footprint: Dictionary = _measure_current_footprint()
+		width_m = max(width_m, float(footprint.get("frontage_m", width_m)))
+		depth_m = max(depth_m, float(footprint.get("depth_m", depth_m)))
+	var disorder_band: float = clamp(disorder * 0.55 + (1.0 - cohesion) * 0.25 + terrain_distortion * 0.2, 0.0, 1.0)
+	return {
+		"position": position,
+		"facing": facing,
+		"formation_state": formation_state,
+		"formation_progress": formation_progress,
+		"frontage_m": width_m,
+		"depth_m": depth_m,
+		"alignment_score": alignment_score,
+		"front_continuity": front_continuity,
+		"depth_cohesion": depth_cohesion,
+		"disorder_band": disorder_band,
+		"smoke_burden": smoke_burden,
+		"compression_level": compression_level,
+		"contact_pressure": contact_pressure,
+		"contact_frontage_ratio": contact_frontage_ratio,
+		"recoil_tendency": recoil_tendency,
+		"locked_in_melee": locked_in_melee,
+		"formation_pressure_direction": formation_pressure_direction,
+		"terrain_distortion": terrain_distortion,
+		"cohesion": cohesion,
+		"morale": morale,
+		"pike_ratio": _safe_ratio(pike_strength, float(max(1, soldiers_total))),
+		"shot_ratio": _safe_ratio(shot_strength_left + shot_strength_right, float(max(1, soldiers_total))),
+		"engagement_state": engagement_mode,
+		"combat_attack_kind": combat_attack_kind,
+		"order_source": order_source,
+		"movement_state": movement_state,
 	}
 
 
@@ -257,6 +423,50 @@ func _sanitize_movement_path(next_movement_path: Array) -> Array:
 
 func _get_active_movement_target() -> Vector3:
 	return movement_path[0] if not movement_path.is_empty() else target_position
+
+
+func reset_contact_state() -> void:
+	separation_contacts = 0
+	separation_push_m = 0.0
+	is_in_contact = false
+	contact_frontage_ratio = 0.0
+	contact_overlap_left = 0.0
+	contact_overlap_right = 0.0
+	compression_level = 0.0
+	contact_pressure = 0.0
+	recoil_tendency = 0.0
+	alignment_loss_from_contact = 0.0
+	locked_in_melee = false
+	contact_opponent_ids.clear()
+
+
+func register_tactical_contact(
+		opponent_id: StringName,
+		pressure_direction: Vector3,
+		frontage_ratio: float,
+		overlap_left: float,
+		overlap_right: float,
+		compression: float,
+		pressure: float,
+		recoil_risk: float,
+		is_melee_locked: bool
+) -> void:
+	is_in_contact = true
+	separation_contacts += 1
+	contact_frontage_ratio = max(contact_frontage_ratio, clamp(frontage_ratio, 0.0, 1.0))
+	contact_overlap_left = max(contact_overlap_left, clamp(overlap_left, 0.0, 1.0))
+	contact_overlap_right = max(contact_overlap_right, clamp(overlap_right, 0.0, 1.0))
+	compression_level = max(compression_level, clamp(compression, 0.0, 1.0))
+	contact_pressure = max(contact_pressure, clamp(pressure, 0.0, 1.0))
+	recoil_tendency = max(recoil_tendency, clamp(recoil_risk, 0.0, 1.0))
+	alignment_loss_from_contact = max(alignment_loss_from_contact, contact_pressure * 0.035 + compression_level * 0.025)
+	locked_in_melee = locked_in_melee or is_melee_locked
+	if not contact_opponent_ids.has(String(opponent_id)):
+		contact_opponent_ids.append(String(opponent_id))
+	var flat_pressure := Vector3(pressure_direction.x, 0.0, pressure_direction.z)
+	if flat_pressure.length_squared() > 0.001:
+		formation_pressure_direction = flat_pressure.normalized()
+	formation_pressure_m = max(formation_pressure_m, 10.0 + contact_pressure * 26.0 + compression_level * 18.0)
 
 
 func _arrive_at_active_waypoint(terrain_state = null) -> void:
@@ -313,6 +523,74 @@ func _estimate_formation_radius_m() -> float:
 		var offset: Vector3 = offset_value
 		radius_m = max(radius_m, Vector2(offset.x, offset.z).length())
 	return radius_m
+
+
+func _update_battalion_condition(terrain_state, delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var footprint: Dictionary = _measure_current_footprint()
+	formation_frontage_m = max(formation_frontage_m, float(footprint.get("frontage_m", formation_frontage_m)))
+	formation_depth_m = float(footprint.get("depth_m", formation_depth_m))
+	interpenetration_stress = clamp(float(separation_contacts) * 0.10 + separation_push_m / 48.0 + compression_level * 0.72 + contact_pressure * 0.36, 0.0, 1.0)
+	movement_state = "moving" if status == CoreV2Types.UnitStatus.MOVING else "stationary"
+	var terrain_speed: float = terrain_state.get_speed_multiplier_at(position, category) if terrain_state != null else 1.0
+	road_contact_state = "road" if terrain_speed > 1.08 else "offroad"
+	movement_strain = clamp((1.0 - terrain_speed) + interpenetration_stress * 0.55 + contact_pressure * 0.22 + (0.25 if is_reforming else 0.0), 0.0, 1.0)
+	fatigue = clamp(fatigue + (0.0025 if status == CoreV2Types.UnitStatus.MOVING else -0.0015) * delta, 0.0, 1.0)
+	if is_in_contact:
+		disorder = clamp(disorder + (contact_pressure * 0.020 + compression_level * 0.026) * delta, 0.0, 1.0)
+		alignment_score = clamp(alignment_score - alignment_loss_from_contact * delta, 0.0, 1.0)
+		front_continuity = clamp(front_continuity - compression_level * 0.035 * delta, 0.0, 1.0)
+	CoreV2BattalionCombatModel.update_condition(self, terrain_state)
+
+
+func _measure_current_footprint() -> Dictionary:
+	if sprite_offsets.is_empty():
+		return {
+			"frontage_m": formation_frontage_m if formation_frontage_m > 0.0 else 80.0,
+			"depth_m": formation_depth_m if formation_depth_m > 0.0 else 48.0,
+		}
+	var min_x: float = INF
+	var max_x: float = -INF
+	var min_z: float = INF
+	var max_z: float = -INF
+	for offset_value in sprite_offsets:
+		var offset: Vector3 = offset_value
+		min_x = min(min_x, offset.x)
+		max_x = max(max_x, offset.x)
+		min_z = min(min_z, offset.z)
+		max_z = max(max_z, offset.z)
+	return {
+		"frontage_m": max(12.0, max_x - min_x),
+		"depth_m": max(12.0, max_z - min_z),
+	}
+
+
+func _safe_ratio(value: float, total: float) -> float:
+	if total <= 0.001:
+		return 0.0
+	return clamp(value / total, 0.0, 1.0)
+
+
+func _resolve_contact_movement_multiplier(active_target: Vector3) -> float:
+	if not is_in_contact:
+		return 1.0
+	var target_direction: Vector3 = active_target - position
+	target_direction.y = 0.0
+	if target_direction.length_squared() <= 0.001:
+		return 1.0
+	target_direction = target_direction.normalized()
+	var pressure_direction: Vector3 = formation_pressure_direction
+	pressure_direction.y = 0.0
+	if pressure_direction.length_squared() <= 0.001:
+		return clamp(1.0 - contact_pressure * 0.72 - compression_level * 0.48, 0.12, 1.0)
+	pressure_direction = pressure_direction.normalized()
+	var moving_into_pressure: float = clamp(target_direction.dot(-pressure_direction), 0.0, 1.0)
+	var base_multiplier: float = 1.0 - contact_pressure * lerp(0.36, 0.88, moving_into_pressure)
+	base_multiplier -= compression_level * lerp(0.18, 0.55, moving_into_pressure)
+	if locked_in_melee and moving_into_pressure > 0.2:
+		base_multiplier = min(base_multiplier, 0.08)
+	return clamp(base_multiplier, 0.03, 1.0)
 
 
 func _resize_sprite_blocks() -> void:

@@ -58,6 +58,7 @@ var _selection_overlay_dirty: bool = true
 var _performance_stats: Dictionary = {}
 var _material_cache: Dictionary = {}
 var _box_mesh_cache: Dictionary = {}
+var _formation_mesh_cache: Dictionary = {}
 var _cylinder_mesh_cache: Dictionary = {}
 var _sphere_mesh_cache: Dictionary = {}
 var _unit_mesh_cache: Dictionary = {}
@@ -135,10 +136,12 @@ func pick_battalion_at(world_position: Vector3) -> StringName:
 		var battalion_id: StringName = battalion_id_value
 		var battalion_snapshot: Dictionary = _battalion_snapshots[battalion_id]
 		var battalion_position: Vector3 = battalion_snapshot.get("position", Vector3.ZERO)
+		var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
+		var pick_radius: float = max(80.0, float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))) * 0.55)
 		var distance_to_click: float = Vector2(battalion_position.x, battalion_position.z).distance_to(
 			Vector2(world_position.x, world_position.z)
 		)
-		if distance_to_click >= nearest_distance:
+		if distance_to_click >= min(nearest_distance, pick_radius):
 			continue
 		nearest_distance = distance_to_click
 		nearest_id = battalion_id
@@ -152,8 +155,10 @@ func pick_selectable_at(world_position: Vector3) -> Dictionary:
 		var battalion_id: StringName = battalion_id_value
 		var battalion_snapshot: Dictionary = _battalion_snapshots[battalion_id]
 		var battalion_position: Vector3 = battalion_snapshot.get("position", Vector3.ZERO)
+		var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
+		var pick_radius: float = max(80.0, float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))) * 0.55)
 		var distance_to_click: float = Vector2(battalion_position.x, battalion_position.z).distance_to(Vector2(world_position.x, world_position.z))
-		if distance_to_click >= nearest_distance:
+		if distance_to_click >= min(nearest_distance, pick_radius):
 			continue
 		nearest_distance = distance_to_click
 		nearest = {
@@ -292,8 +297,7 @@ func _rebuild_dynamic_world(snapshot: Dictionary) -> void:
 	var smoke_count: int = 0
 	var hq_count: int = 0
 	var battalion_count: int = 0
-	var sprite_block_count: int = 0
-	var unit_model_instance_count: int = 0
+	var visual_footprint_count: int = 0
 	var route_waypoint_count: int = 0
 	var messenger_count: int = 0
 	var last_seen_count: int = 0
@@ -341,8 +345,7 @@ func _rebuild_dynamic_world(snapshot: Dictionary) -> void:
 		seen_battalion_ids[battalion_id] = true
 		_sync_battalion_visual(battalion_id, battalion_snapshot)
 		battalion_count += 1
-		sprite_block_count += _get_snapshot_target_offsets(battalion_snapshot).size()
-		unit_model_instance_count += _count_unit_model_instances(battalion_snapshot)
+		visual_footprint_count += 1
 		route_waypoint_count += battalion_snapshot.get("movement_path", []).size()
 		if not bool(battalion_snapshot.get("is_friendly", false)):
 			continue
@@ -400,14 +403,15 @@ func _rebuild_dynamic_world(snapshot: Dictionary) -> void:
 	_performance_stats["smoke_nodes"] = smoke_count
 	_performance_stats["hq_nodes"] = hq_count
 	_performance_stats["battalion_nodes"] = battalion_count
-	_performance_stats["sprite_blocks"] = sprite_block_count
-	_performance_stats["unit_model_instances"] = unit_model_instance_count
+	_performance_stats["battalion_footprints"] = visual_footprint_count
+	_performance_stats["sprite_blocks"] = 0
+	_performance_stats["unit_model_instances"] = 0
 	_performance_stats["unit_multimeshes"] = _count_unit_multimeshes()
 	_performance_stats["route_waypoints"] = route_waypoint_count
 	_performance_stats["order_messengers"] = messenger_count
 	_performance_stats["last_seen_markers"] = last_seen_count
 	_performance_stats["material_cache"] = _material_cache.size() + _unit_material_cache.size()
-	_performance_stats["mesh_cache"] = _box_mesh_cache.size() + _cylinder_mesh_cache.size() + _sphere_mesh_cache.size() + _unit_mesh_cache.size()
+	_performance_stats["mesh_cache"] = _box_mesh_cache.size() + _formation_mesh_cache.size() + _cylinder_mesh_cache.size() + _sphere_mesh_cache.size() + _unit_mesh_cache.size()
 	_performance_stats["sprite_pool"] = _sprite_block_pool.size()
 	_performance_stats["sprite_blocks_created"] = _sprite_blocks_created
 	_performance_stats["battalion_visuals"] = _battalion_visuals.size()
@@ -829,6 +833,11 @@ func _create_battalion_visual(battalion_id: StringName) -> Dictionary:
 		"root": root,
 		"label": label,
 		"fallback_marker": null,
+		"mass_marker": null,
+		"pike_marker": null,
+		"shot_left_marker": null,
+		"shot_right_marker": null,
+		"smoke_marker": null,
 		"sprites": [],
 		"unit_multimeshes": {},
 		"from_position": Vector3.ZERO,
@@ -869,10 +878,18 @@ func _build_battalion_geometry_signature(battalion_snapshot: Dictionary) -> int:
 	var casualties_bucket: int = int(round(float(int(battalion_snapshot.get("recent_casualties_taken", 0))) / 5.0))
 	var terrain_speed_bucket: int = int(round(float(battalion_snapshot.get("terrain_speed_multiplier", 1.0)) * 10.0))
 	var movement_direction: Vector3 = _resolve_snapshot_movement_direction(battalion_snapshot)
+	var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
 	var signature_source: Dictionary = {
-		"sprite_target_offsets": _get_snapshot_target_offsets(battalion_snapshot),
-		"sprite_roles": battalion_snapshot.get("sprite_roles", []),
-		"sprite_attack_kinds": _build_sprite_attack_kind_map(battalion_snapshot),
+		"formation_state": int(visual_state.get("formation_state", battalion_snapshot.get("formation_state", CoreV2Types.FormationState.LINE))),
+		"frontage_bucket": int(round(float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))) / 4.0)),
+		"depth_bucket": int(round(float(visual_state.get("depth_m", battalion_snapshot.get("formation_depth_m", 48.0))) / 4.0)),
+		"disorder_bucket": int(round(float(visual_state.get("disorder_band", battalion_snapshot.get("disorder", 0.0))) * 10.0)),
+		"smoke_bucket": int(round(float(visual_state.get("smoke_burden", battalion_snapshot.get("smoke_burden", 0.0))) * 10.0)),
+		"pike_bucket": int(round(float(visual_state.get("pike_ratio", battalion_snapshot.get("pike_ratio", 0.35))) * 20.0)),
+		"shot_bucket": int(round(float(visual_state.get("shot_ratio", battalion_snapshot.get("shot_ratio", 0.65))) * 20.0)),
+		"compression_bucket": int(round(float(visual_state.get("compression_level", battalion_snapshot.get("compression_level", 0.0))) * 12.0)),
+		"contact_bucket": int(round(float(visual_state.get("contact_pressure", battalion_snapshot.get("contact_pressure", 0.0))) * 12.0)),
+		"recoil_bucket": int(round(float(visual_state.get("recoil_tendency", battalion_snapshot.get("recoil_tendency", 0.0))) * 10.0)),
 		"status": int(battalion_snapshot.get("status", CoreV2Types.UnitStatus.IDLE)),
 		"movement_x_bucket": int(round(movement_direction.x * 10.0)),
 		"movement_z_bucket": int(round(movement_direction.z * 10.0)),
@@ -1029,38 +1046,85 @@ func _sync_battalion_geometry(
 		battalion_snapshot: Dictionary,
 		should_snap: bool
 ) -> void:
-	var sprite_offsets: Array = _build_client_visual_offsets(battalion_snapshot)
-	if sprite_offsets.is_empty():
-		_release_visual_sprites(visual)
-		_clear_unit_multimeshes(visual)
-		_sync_battalion_fallback_marker(visual, battalion_snapshot)
-		return
+	_release_visual_sprites(visual)
+	_clear_unit_multimeshes(visual)
 	_remove_fallback_marker(visual)
+	_sync_battalion_mass_visual(visual, battalion_snapshot)
 
-	var sprite_roles: Array = battalion_snapshot.get("sprite_roles", [])
-	var sprite_attack_kinds: Dictionary = _build_sprite_attack_kind_map(battalion_snapshot)
+
+func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Dictionary) -> void:
+	var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
 	var battalion_color: Color = battalion_snapshot.get("color", Color(1.0, 1.0, 1.0))
-	var unit_target_transforms: Dictionary = {}
-	var fallback_entries: Array = []
-	var block_local_positions: Array = []
-	for index in range(sprite_offsets.size()):
-		var role: String = String(sprite_roles[index]) if index < sprite_roles.size() else "mixed"
-		var attack_kind: String = String(sprite_attack_kinds.get(index, ""))
-		var sprite_offset: Vector3 = sprite_offsets[index]
-		var block_center_local: Vector3 = sprite_offset
-		block_local_positions.append(block_center_local)
-		if _can_render_role_with_unit_models(role):
-			_append_infantry_block_unit_transforms(unit_target_transforms, block_center_local, Vector3.FORWARD, role, attack_kind)
-		else:
-			fallback_entries.append({
-				"role": role,
-				"attack_kind": attack_kind,
-				"position": block_center_local,
-			})
+	var frontage_m: float = max(32.0, float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))))
+	var depth_m: float = max(20.0, float(visual_state.get("depth_m", battalion_snapshot.get("formation_depth_m", 48.0))))
+	var disorder_band: float = clamp(float(visual_state.get("disorder_band", battalion_snapshot.get("disorder", 0.0))), 0.0, 1.0)
+	var smoke_burden: float = clamp(float(visual_state.get("smoke_burden", battalion_snapshot.get("smoke_burden", 0.0))), 0.0, 1.0)
+	var pike_ratio: float = clamp(float(visual_state.get("pike_ratio", battalion_snapshot.get("pike_ratio", 0.35))), 0.0, 1.0)
+	var shot_ratio: float = clamp(float(visual_state.get("shot_ratio", battalion_snapshot.get("shot_ratio", 0.65))), 0.0, 1.0)
+	var compression_level: float = clamp(float(visual_state.get("compression_level", battalion_snapshot.get("compression_level", 0.0))), 0.0, 1.0)
+	var contact_pressure: float = clamp(float(visual_state.get("contact_pressure", battalion_snapshot.get("contact_pressure", 0.0))), 0.0, 1.0)
+	var recoil_tendency: float = clamp(float(visual_state.get("recoil_tendency", battalion_snapshot.get("recoil_tendency", 0.0))), 0.0, 1.0)
+	var terrain_distortion: float = clamp(float(visual_state.get("terrain_distortion", battalion_snapshot.get("terrain_distortion", 0.0))), 0.0, 1.0)
+	var body_height: float = 6.5 + disorder_band * 2.2 + contact_pressure * 1.4
+	var visual_irregularity: float = clamp(disorder_band * 0.58 + terrain_distortion * 0.22 + contact_pressure * 0.28 + recoil_tendency * 0.22, 0.05, 1.0)
+	var distorted_frontage: float = frontage_m * (1.0 + disorder_band * 0.08 - compression_level * 0.06)
+	var distorted_depth: float = depth_m * (1.0 + disorder_band * 0.16 - compression_level * 0.14 + recoil_tendency * 0.08)
+	var mass_color: Color = battalion_color.lerp(Color(0.42, 0.38, 0.31, 1.0), smoke_burden * 0.35).darkened(disorder_band * 0.18)
+	var shape_seed: int = String(battalion_snapshot.get("id", "")).hash()
 
-	var formation_duration: float = _begin_client_block_motion(visual, battalion_snapshot, block_local_positions, should_snap)
-	_sync_fallback_sprite_blocks(visual, fallback_entries, battalion_color, should_snap, formation_duration)
-	_sync_unit_multimeshes(visual, unit_target_transforms, battalion_color, should_snap, formation_duration)
+	var mass_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "mass_marker", "BattalionMass")
+	mass_marker.mesh = _get_formation_body_mesh(distorted_frontage, body_height, distorted_depth, visual_irregularity, compression_level, contact_pressure, shape_seed)
+	mass_marker.position = Vector3.ZERO
+	mass_marker.material_override = _make_material(Color(mass_color.r, mass_color.g, mass_color.b, 0.72), true, false)
+	mass_marker.visible = true
+
+	var pike_width: float = max(8.0, distorted_frontage * clamp(pike_ratio, 0.12, 0.62))
+	var shot_width_total: float = max(0.0, distorted_frontage - pike_width)
+	var shot_width: float = max(5.0, shot_width_total * 0.5)
+	var sub_height: float = body_height + 1.4
+	var pike_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "pike_marker", "PikeCore")
+	pike_marker.mesh = _get_formation_body_mesh(pike_width, sub_height, distorted_depth * 0.78, visual_irregularity * 0.42, compression_level * 0.35, contact_pressure * 0.45, shape_seed + 17)
+	pike_marker.position = Vector3(0.0, 0.18, 0.0)
+	pike_marker.material_override = _make_material(battalion_color.lightened(0.18), false, false)
+	pike_marker.visible = pike_ratio > 0.03
+
+	var shot_color: Color = battalion_color.darkened(0.12).lerp(Color(0.82, 0.82, 0.76, 1.0), smoke_burden * 0.22)
+	var left_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "shot_left_marker", "ShotLeft")
+	left_marker.mesh = _get_formation_body_mesh(shot_width, sub_height * 0.82, distorted_depth * 0.9, visual_irregularity * 0.56, compression_level * 0.5, contact_pressure * 0.35, shape_seed + 31)
+	left_marker.position = Vector3(-(pike_width + shot_width) * 0.5, 0.26, 0.0)
+	left_marker.material_override = _make_material(shot_color, false, false)
+	left_marker.visible = shot_ratio > 0.03
+
+	var right_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "shot_right_marker", "ShotRight")
+	right_marker.mesh = _get_formation_body_mesh(shot_width, sub_height * 0.82, distorted_depth * 0.9, visual_irregularity * 0.56, compression_level * 0.5, contact_pressure * 0.35, shape_seed + 47)
+	right_marker.position = Vector3((pike_width + shot_width) * 0.5, 0.26, 0.0)
+	right_marker.material_override = _make_material(shot_color, false, false)
+	right_marker.visible = shot_ratio > 0.03
+
+	var smoke_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "smoke_marker", "BattalionSmoke")
+	var firing_smoke: float = 0.18 if String(visual_state.get("combat_attack_kind", battalion_snapshot.get("combat_attack_kind", ""))) in ["musket", "artillery"] else 0.0
+	var smoke_intensity: float = clamp(max(smoke_burden, firing_smoke), 0.0, 1.0)
+	if smoke_intensity > 0.03:
+		var smoke_radius: float = max(24.0, distorted_frontage * (0.28 + smoke_intensity * 0.18))
+		var smoke_height: float = 18.0 + smoke_intensity * 28.0
+		smoke_marker.mesh = _get_sphere_mesh(smoke_radius, smoke_height)
+		smoke_marker.position = Vector3(0.0, body_height + smoke_height * 0.18, distorted_depth * 0.34)
+		smoke_marker.material_override = _make_material(Color(0.56, 0.56, 0.50, 0.16 + smoke_intensity * 0.18), true, true)
+		smoke_marker.visible = true
+	else:
+		smoke_marker.visible = false
+
+
+func _get_or_create_battalion_marker(visual: Dictionary, visual_key: String, marker_name: String) -> MeshInstance3D:
+	var marker: MeshInstance3D = visual.get(visual_key, null) as MeshInstance3D
+	if marker != null and is_instance_valid(marker):
+		return marker
+	var root: Node3D = visual["root"] as Node3D
+	marker = MeshInstance3D.new()
+	marker.name = marker_name
+	root.add_child(marker)
+	visual[visual_key] = marker
+	return marker
 
 
 func _build_sprite_attack_kind_map(battalion_snapshot: Dictionary) -> Dictionary:
@@ -2213,6 +2277,119 @@ func _transform_local_offset(local_offset: Vector3, facing: Vector3) -> Vector3:
 	forward = forward.normalized()
 	var side := Vector3(-forward.z, 0.0, forward.x).normalized()
 	return side * local_offset.x + Vector3.UP * local_offset.y + forward * local_offset.z
+
+
+func _get_formation_body_mesh(
+		frontage_m: float,
+		height_m: float,
+		depth_m: float,
+		irregularity: float,
+		compression: float,
+		pressure: float,
+		shape_seed: int
+) -> Mesh:
+	var frontage_bucket: int = int(round(frontage_m / 4.0))
+	var height_bucket: int = int(round(height_m / 1.0))
+	var depth_bucket: int = int(round(depth_m / 4.0))
+	var irregularity_bucket: int = int(round(clamp(irregularity, 0.0, 1.0) * 10.0))
+	var compression_bucket: int = int(round(clamp(compression, 0.0, 1.0) * 10.0))
+	var pressure_bucket: int = int(round(clamp(pressure, 0.0, 1.0) * 10.0))
+	var seed_bucket: int = abs(shape_seed) % 97
+	var cache_key: String = "%d:%d:%d:%d:%d:%d:%d" % [
+		frontage_bucket,
+		height_bucket,
+		depth_bucket,
+		irregularity_bucket,
+		compression_bucket,
+		pressure_bucket,
+		seed_bucket,
+	]
+	if _formation_mesh_cache.has(cache_key):
+		return _formation_mesh_cache[cache_key] as Mesh
+	var points: Array = _build_formation_outline_points(
+		float(frontage_bucket) * 4.0,
+		float(depth_bucket) * 4.0,
+		float(irregularity_bucket) / 10.0,
+		float(compression_bucket) / 10.0,
+		float(pressure_bucket) / 10.0,
+		shape_seed
+	)
+	var mesh: Mesh = _build_prism_mesh(points, max(1.0, float(height_bucket)))
+	_formation_mesh_cache[cache_key] = mesh
+	return mesh
+
+
+func _build_formation_outline_points(frontage_m: float, depth_m: float, irregularity: float, compression: float, pressure: float, shape_seed: int) -> Array:
+	var half_width: float = max(8.0, frontage_m * 0.5)
+	var half_depth: float = max(6.0, depth_m * 0.5)
+	var wave_m: float = 1.2 + irregularity * 9.5 + pressure * 5.0
+	var front_bow_m: float = pressure * 6.0 + compression * 4.0
+	var edge_slack_m: float = irregularity * 5.5 + compression * 2.0
+	return [
+		Vector2(-half_width + _shape_noise(shape_seed, 0) * edge_slack_m, -half_depth + _shape_noise(shape_seed, 1) * wave_m * 0.45),
+		Vector2(-half_width * 0.55 + _shape_noise(shape_seed, 2) * wave_m, -half_depth - _shape_noise(shape_seed, 3) * wave_m * 0.35),
+		Vector2(_shape_noise(shape_seed, 4) * wave_m * 0.5, -half_depth - front_bow_m + _shape_noise(shape_seed, 5) * wave_m * 0.25),
+		Vector2(half_width * 0.55 + _shape_noise(shape_seed, 6) * wave_m, -half_depth - _shape_noise(shape_seed, 7) * wave_m * 0.35),
+		Vector2(half_width + _shape_noise(shape_seed, 8) * edge_slack_m, -half_depth + _shape_noise(shape_seed, 9) * wave_m * 0.45),
+		Vector2(half_width + edge_slack_m * 0.45, _shape_noise(shape_seed, 10) * wave_m * 0.35),
+		Vector2(half_width + _shape_noise(shape_seed, 11) * edge_slack_m, half_depth + _shape_noise(shape_seed, 12) * wave_m * 0.35),
+		Vector2(half_width * 0.40 + _shape_noise(shape_seed, 13) * wave_m, half_depth + _shape_noise(shape_seed, 14) * wave_m * 0.30),
+		Vector2(_shape_noise(shape_seed, 15) * wave_m * 0.4, half_depth + _shape_noise(shape_seed, 16) * wave_m * 0.35),
+		Vector2(-half_width * 0.40 + _shape_noise(shape_seed, 17) * wave_m, half_depth + _shape_noise(shape_seed, 18) * wave_m * 0.30),
+		Vector2(-half_width + _shape_noise(shape_seed, 19) * edge_slack_m, half_depth + _shape_noise(shape_seed, 20) * wave_m * 0.35),
+		Vector2(-half_width - edge_slack_m * 0.45, _shape_noise(shape_seed, 21) * wave_m * 0.35),
+	]
+
+
+func _shape_noise(shape_seed: int, index: int) -> float:
+	return sin(float(abs(shape_seed) % 1009) * 0.037 + float(index) * 1.713)
+
+
+func _build_prism_mesh(points: Array, height_m: float) -> Mesh:
+	var vertices: Array = []
+	var normals: Array = []
+	var top_center := Vector3.ZERO
+	for point_value in points:
+		var point: Vector2 = point_value
+		top_center += Vector3(point.x, height_m, point.y)
+	top_center /= float(max(1, points.size()))
+	for index in range(points.size()):
+		var next_index: int = (index + 1) % points.size()
+		var point_a: Vector2 = points[index]
+		var point_b: Vector2 = points[next_index]
+		var bottom_a := Vector3(point_a.x, 0.0, point_a.y)
+		var bottom_b := Vector3(point_b.x, 0.0, point_b.y)
+		var top_a := Vector3(point_a.x, height_m, point_a.y)
+		var top_b := Vector3(point_b.x, height_m, point_b.y)
+		_append_mesh_triangle(vertices, normals, top_center, top_a, top_b, Vector3.UP)
+		var edge: Vector3 = top_b - top_a
+		var side_normal := Vector3(edge.z, 0.0, -edge.x).normalized()
+		if side_normal.length_squared() <= 0.001:
+			side_normal = Vector3.FORWARD
+		_append_mesh_triangle(vertices, normals, bottom_a, bottom_b, top_b, side_normal)
+		_append_mesh_triangle(vertices, normals, bottom_a, top_b, top_a, side_normal)
+	var packed_vertices := PackedVector3Array()
+	var packed_normals := PackedVector3Array()
+	for vertex_value in vertices:
+		packed_vertices.append(vertex_value)
+	for normal_value in normals:
+		packed_normals.append(normal_value)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = packed_vertices
+	arrays[Mesh.ARRAY_NORMAL] = packed_normals
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+func _append_mesh_triangle(vertices: Array, normals: Array, a: Vector3, b: Vector3, c: Vector3, normal: Vector3) -> void:
+	vertices.append(a)
+	vertices.append(b)
+	vertices.append(c)
+	normals.append(normal)
+	normals.append(normal)
+	normals.append(normal)
 
 
 func _get_box_mesh(size_value: Vector3) -> BoxMesh:
