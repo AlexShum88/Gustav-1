@@ -720,3 +720,27 @@ Load-test 5x10 завершено як тимчасову перевірку і 
 - нові visual irregularity/compression/smoke є похідними від snapshot `visual_state`;
 - контакт тепер описує стан людської маси під тиском, а не фізичну коробку, яку треба постійно виштовхувати;
 - наступна якісна перевірка має бути в Godot runtime: подивитися чи не треба зменшити/підняти `FIRE_CASUALTY_CONVERSION`, `MELEE_CASUALTY_CONVERSION_PER_SECOND`, recoil amount і visual irregularity buckets під фактичний FPS та читабельність бою.
+
+### Етап: doctrine cleanup для battalion-centric render і composite combat
+
+Поточний код уже мав server-authoritative composite combat і battalion-centric напрямок, але в presentation layer ще лишалися активні назви й гілки старої block-era візуалізації. Цей cleanup прибрав їх з нормального render path і закріпив, що fixed 50-man blocks не є contract між server snapshot і client view.
+
+Зроблено:
+
+- додано `CoreV2BattalionVisualModel` як presentation-only mapper: snapshot батальйону перетворюється на stable visual frontage/depth, compression, disorder, smoke intensity, pike/shot proportions і cue counts;
+- `CoreV2BattlefieldView` більше не тримає active sprite block pool, per-block sprite arrays, unit multimesh arrays або legacy battalion node factory;
+- основний visual батальйону лишається одним actor: irregular footprint mass + pike core / shot wing sub-zones + pressure band + smoke marker + невелика кількість MultiMesh doctrine cues з `musketeer_lowpoly.obj` і `pikeman_lowpoly.obj`;
+- MultiMesh cues є лише косметичними formation hints всередині одного battalion visual, не snapshot entities і не combat carriers;
+- formation transition у presentation тепер інтерполює visual frontage/depth до desired formation, тому зміна строю має виглядати як перебудова маси, а не як scale-pop у фінальний кадр;
+- HUD більше не показує "спрайтів" як бойовий carrier, а monitor отримав `Formation cues`;
+- contact footprint у `CoreV2FormationSeparationSystem` тепер бере battalion-level `formation_frontage_m` / `formation_depth_m` як базу, а старі offsets використовуються тільки як внутрішнє уточнення, якщо вони є;
+- terrain order strain тепер впливає на fire output, melee output, staying power, maneuver power, suppression/disorder recovery і doctrine degradation;
+- reform progress сповільнюється поганим terrain, disorder, contact pressure, compression і movement strain;
+- melee tuning піднято через pressure/shock/recoil logic: більше material loss у sustained contact, сильніший functional shock, нижчий breakthrough threshold, помітніше recoil tendency;
+- ranged fire отримав сильніший functional pressure і повільніше згасання suppression/disorder, щоб залпи реально формували бойову течію, але не видаляли батальйони миттєво.
+
+Рішення:
+
+- `CoreV2SpriteBlock` лишається ізольованим legacy/debug шаром і вимкнений через `legacy_sprite_blocks_enabled = false`;
+- старий block-level combat код у `CoreV2CombatSystem` поки лишається як legacy helper/rollback point, але активний `update_combat()` працює через `CoreV2CombatEngagement` і `CoreV2BattalionCombatModel`;
+- бойова істина залишається в battalion domain state, а presentation mesh, cue transforms і smoothing не мають права впливати на combat correctness.

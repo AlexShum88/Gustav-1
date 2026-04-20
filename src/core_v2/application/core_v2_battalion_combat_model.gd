@@ -34,7 +34,7 @@ static func update_condition(battalion: CoreV2Battalion, state: CoreV2BattleStat
 	var terrain_speed: float = state.get_speed_multiplier_at(battalion.position, battalion.category) if state != null else 1.0
 	var terrain_defense: float = state.get_defense_modifier_at(battalion.position) if state != null else 0.0
 	var smoke_density: float = state.get_smoke_density_at(battalion.position) if state != null else battalion.smoke_burden
-	battalion.terrain_distortion = clamp(1.0 - terrain_speed + max(0.0, -terrain_defense) * 0.45 + battalion.movement_strain * 0.18, 0.0, 1.0)
+	battalion.terrain_distortion = _resolve_terrain_order_strain(state, battalion, terrain_speed, terrain_defense)
 	battalion.smoke_burden = lerp(battalion.smoke_burden, smoke_density, 0.35)
 	battalion.alignment_score = clamp(
 		battalion.alignment_score - battalion.terrain_distortion * 0.014 - battalion.disorder * 0.010 - battalion.contact_pressure * 0.012,
@@ -49,9 +49,9 @@ static func update_condition(battalion: CoreV2Battalion, state: CoreV2BattleStat
 	if battalion.is_reforming:
 		battalion.disorder = min(1.0, battalion.disorder + 0.006 + battalion.terrain_distortion * 0.004)
 	if battalion.suppression > 0.0:
-		battalion.suppression = max(0.0, battalion.suppression - (0.002 if battalion.is_in_contact else 0.004))
+		battalion.suppression = max(0.0, battalion.suppression - (0.0009 if battalion.is_in_contact else 0.0018))
 	if battalion.disorder > 0.0 and not battalion.is_reforming and not battalion.is_in_contact:
-		var recovery: float = 0.004 * clamp((battalion.drill_quality + battalion.officer_quality) * 0.5, 0.2, 1.0)
+		var recovery: float = 0.0018 * clamp((battalion.drill_quality + battalion.officer_quality) * 0.5, 0.2, 1.0)
 		battalion.disorder = max(0.0, battalion.disorder - recovery)
 	_maybe_degrade_fire_doctrine(battalion)
 
@@ -75,7 +75,11 @@ static func resolve_fire_output(battalion: CoreV2Battalion) -> float:
 	var doctrine: Dictionary = _resolve_fire_doctrine_modifiers(battalion)
 	var formation_factor: float = _resolve_formation_fire_factor(battalion)
 	var active_rank_share: float = _resolve_active_fire_rank_share(battalion)
-	var pressure_factor: float = clamp(1.0 - battalion.suppression * 0.65 - battalion.disorder * 0.55 - battalion.smoke_burden * 0.48 - battalion.contact_pressure * 0.35, 0.08, 1.15)
+	var pressure_factor: float = clamp(
+		1.0 - battalion.suppression * 0.65 - battalion.disorder * 0.55 - battalion.smoke_burden * 0.48 - battalion.contact_pressure * 0.35 - battalion.terrain_distortion * 0.28,
+		0.08,
+		1.15
+	)
 	var quality_factor: float = clamp((battalion.drill_quality * 0.62 + battalion.officer_quality * 0.18 + battalion.cohesion * 0.2), 0.12, 1.18)
 	return shot_strength * active_rank_share * battalion.ammo_state * formation_factor * pressure_factor * quality_factor * float(doctrine.get("fire_output", 1.0))
 
@@ -83,7 +87,7 @@ static func resolve_fire_output(battalion: CoreV2Battalion) -> float:
 static func resolve_melee_output(battalion: CoreV2Battalion) -> float:
 	var formation_factor: float = _resolve_formation_melee_factor(battalion)
 	var condition_factor: float = clamp(battalion.cohesion * 0.48 + battalion.morale * 0.32 + (1.0 - battalion.fatigue) * 0.2, 0.08, 1.15)
-	var disorder_factor: float = clamp(1.0 - battalion.disorder * 0.72 - battalion.suppression * 0.28 - battalion.compression_level * 0.18, 0.05, 1.0)
+	var disorder_factor: float = clamp(1.0 - battalion.disorder * 0.72 - battalion.suppression * 0.28 - battalion.compression_level * 0.18 - battalion.terrain_distortion * 0.22, 0.05, 1.0)
 	var alignment_factor: float = clamp(battalion.alignment_score * 0.62 + battalion.front_continuity * 0.38, 0.12, 1.08)
 	if battalion.category == CoreV2Types.UnitCategory.CAVALRY:
 		return float(battalion.soldiers_total) * 1.32 * condition_factor * disorder_factor * formation_factor * alignment_factor
@@ -95,7 +99,8 @@ static func resolve_staying_power(state: CoreV2BattleState, battalion: CoreV2Bat
 	var depth_factor: float = _resolve_formation_depth_factor(battalion)
 	var command_factor: float = clamp((battalion.officer_quality + battalion.morale) * 0.5, 0.1, 1.12)
 	var contact_penalty: float = clamp(1.0 - battalion.compression_level * 0.24 - battalion.contact_pressure * 0.16, 0.35, 1.0)
-	return float(max(1, battalion.soldiers_total)) * depth_factor * command_factor * battalion.front_continuity * battalion.depth_cohesion * contact_penalty * (1.0 + terrain_defense)
+	var terrain_order_factor: float = clamp(1.0 - battalion.terrain_distortion * 0.18, 0.62, 1.0)
+	return float(max(1, battalion.soldiers_total)) * depth_factor * command_factor * battalion.front_continuity * battalion.depth_cohesion * contact_penalty * terrain_order_factor * (1.0 + terrain_defense)
 
 
 static func resolve_maneuver_power(state: CoreV2BattleState, battalion: CoreV2Battalion) -> float:
@@ -103,7 +108,7 @@ static func resolve_maneuver_power(state: CoreV2BattleState, battalion: CoreV2Ba
 	var formation_factor: float = _resolve_formation_maneuver_factor(battalion)
 	var drill_factor: float = clamp(battalion.drill_quality * 0.72 + battalion.cohesion * 0.28, 0.1, 1.08)
 	var contact_factor: float = clamp(1.0 - battalion.contact_pressure * 0.72 - battalion.compression_level * 0.38, 0.05, 1.0)
-	return battalion.move_speed_mps * terrain_speed * formation_factor * drill_factor * contact_factor * clamp(1.0 - battalion.disorder * 0.72 - battalion.fatigue * 0.45, 0.08, 1.0)
+	return battalion.move_speed_mps * terrain_speed * formation_factor * drill_factor * contact_factor * clamp(1.0 - battalion.disorder * 0.72 - battalion.fatigue * 0.45 - battalion.terrain_distortion * 0.34, 0.08, 1.0)
 
 
 static func apply_material_loss(battalion: CoreV2Battalion, casualties: int, pressure_is_melee: bool) -> void:
@@ -160,6 +165,35 @@ static func _normalize_composition_to_total(battalion: CoreV2Battalion) -> void:
 	battalion.pike_strength *= scale
 	battalion.shot_strength_left *= scale
 	battalion.shot_strength_right *= scale
+
+
+static func _resolve_terrain_order_strain(state: CoreV2BattleState, battalion: CoreV2Battalion, terrain_speed: float, terrain_defense: float) -> float:
+	# Терен у цій моделі не тільки гальмує рух, а й руйнує здатність маси людей тримати фронт і процедуру вогню.
+	var type_strain: float = 0.0
+	if state != null:
+		match state.get_terrain_type_at(battalion.position):
+			CoreV2Types.TerrainType.FOREST:
+				type_strain = 0.22
+			CoreV2Types.TerrainType.MARSH:
+				type_strain = 0.34
+			CoreV2Types.TerrainType.BRUSH:
+				type_strain = 0.16
+			CoreV2Types.TerrainType.FARM:
+				type_strain = 0.12
+			CoreV2Types.TerrainType.VILLAGE:
+				type_strain = 0.20
+			CoreV2Types.TerrainType.TOWN:
+				type_strain = 0.26
+			CoreV2Types.TerrainType.HILL:
+				type_strain = 0.10
+			CoreV2Types.TerrainType.RAVINE:
+				type_strain = 0.38
+			_:
+				type_strain = 0.0
+	var speed_strain: float = max(0.0, 1.0 - terrain_speed) * 0.82
+	var cover_strain: float = max(0.0, terrain_defense) * 0.18
+	var pressure_strain: float = battalion.movement_strain * 0.28 + battalion.contact_pressure * 0.16 + battalion.compression_level * 0.10
+	return clamp(speed_strain + cover_strain + type_strain + pressure_strain, 0.0, 1.0)
 
 
 static func _resolve_fire_doctrine_modifiers(battalion: CoreV2Battalion) -> Dictionary:

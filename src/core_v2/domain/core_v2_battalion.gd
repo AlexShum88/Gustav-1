@@ -44,6 +44,7 @@ var combat_cooldown_seconds: float = 0.0
 var combat_reload_seconds: float = 0.0
 var combat_attack_kind: String = ""
 var combat_melee_blocks: int = 0
+var combat_melee_pressure: float = 0.0
 var recent_casualties_inflicted: int = 0
 var recent_casualties_taken: int = 0
 var fire_casualty_carry: float = 0.0
@@ -318,7 +319,7 @@ func create_snapshot(player_army_id: StringName) -> Dictionary:
 		"combat_cooldown_seconds": combat_cooldown_seconds,
 		"combat_reload_seconds": combat_reload_seconds,
 		"combat_attack_kind": combat_attack_kind,
-		"combat_melee_blocks": combat_melee_blocks,
+		"combat_melee_pressure": combat_melee_pressure,
 		"recent_casualties_inflicted": recent_casualties_inflicted,
 		"recent_casualties_taken": recent_casualties_taken,
 		"recent_combat_event": recent_combat_event,
@@ -401,6 +402,7 @@ func create_visual_state() -> Dictionary:
 		"shot_ratio": _safe_ratio(shot_strength_left + shot_strength_right, float(max(1, soldiers_total))),
 		"engagement_state": engagement_mode,
 		"combat_attack_kind": combat_attack_kind,
+		"combat_melee_pressure": combat_melee_pressure,
 		"order_source": order_source,
 		"movement_state": movement_state,
 	}
