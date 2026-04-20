@@ -439,6 +439,7 @@ static func _create_battalion(
 	battalion.sprite_count = 20
 	battalion.status = CoreV2Types.UnitStatus.IDLE
 	battalion.ensure_formation_ready()
+	CoreV2BattalionCombatModel.initialize_composite(battalion)
 	return battalion
 
 

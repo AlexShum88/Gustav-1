@@ -44,8 +44,14 @@ var recent_events: Array = []
 var max_recent_events: int = 10
 var visible_entity_keys_by_army: Dictionary = {}
 var last_seen_by_army: Dictionary = {}
+var static_world_revision: int = 1
+var rare_world_revision: int = 1
+var battle_revision: int = 1
 var _visibility_accumulator: float = 0.0
 var _visibility_interval: float = 0.25
+var _last_seen_accumulator: float = 0.0
+var _last_seen_interval: float = 1.0
+var _visibility_observer_cursor: int = 0
 
 
 func add_army(army: CoreV2Army) -> void:
@@ -54,12 +60,14 @@ func add_army(army: CoreV2Army) -> void:
 	armies[army.id] = army
 	visible_entity_keys_by_army[army.id] = {}
 	last_seen_by_army[army.id] = {}
+	mark_static_world_changed()
 
 
 func add_objective(objective: CoreV2Objective) -> void:
 	if objective == null:
 		return
 	objectives.append(objective)
+	mark_rare_world_changed()
 
 
 func add_terrain_patch(
@@ -87,6 +95,7 @@ func add_terrain_patch(
 		"defense_modifier": defense_modifier,
 		"color": color,
 	})
+	mark_static_world_changed()
 
 
 func add_road(id_text: String, display_name: String, points: Array, width_m: float, speed_multiplier: float) -> void:
@@ -100,6 +109,7 @@ func add_road(id_text: String, display_name: String, points: Array, width_m: flo
 		"color": Color(0.46, 0.39, 0.25, 0.92),
 	})
 	_road_route_graph_cache.clear()
+	mark_static_world_changed()
 
 
 func set_weather(id_text: String, display_name: String, vision_multiplier: float, color: Color) -> void:
@@ -109,6 +119,7 @@ func set_weather(id_text: String, display_name: String, vision_multiplier: float
 		"vision_multiplier": clamp(vision_multiplier, 0.15, 1.35),
 		"color": color,
 	}
+	mark_rare_world_changed()
 
 
 func add_smoke_zone(
@@ -139,6 +150,7 @@ func add_smoke_zone(
 		"source_army_id": "",
 		"source_entity_id": "",
 	})
+	mark_rare_world_changed()
 
 
 func emit_weapon_smoke(attacker: CoreV2Battalion, target_position: Vector3, attack_kind: String) -> void:
@@ -248,6 +260,20 @@ func get_player_army() -> CoreV2Army:
 	return get_army(player_army_id)
 
 
+func mark_static_world_changed() -> void:
+	static_world_revision += 1
+	battle_revision += 1
+
+
+func mark_rare_world_changed() -> void:
+	rare_world_revision += 1
+	battle_revision += 1
+
+
+func mark_battle_changed() -> void:
+	battle_revision += 1
+
+
 func process_command(command: Dictionary) -> void:
 	# Усі дії клієнта проходять тут, щоб правила залишались сервер-авторитативними.
 	var command_type: int = int(command.get("command_type", -1))
@@ -258,6 +284,8 @@ func process_command(command: Dictionary) -> void:
 			_process_place_commander(command)
 		CoreV2Types.CommandType.ISSUE_BRIGADE_ORDER:
 			_process_issue_brigade_order(command)
+		CoreV2Types.CommandType.ISSUE_BATTALION_ORDER:
+			_process_issue_battalion_order(command)
 		CoreV2Types.CommandType.START_BATTLE:
 			_process_start_battle(command)
 		CoreV2Types.CommandType.DEBUG_FORCE_FORMATION:
@@ -272,21 +300,26 @@ func advance(delta: float) -> void:
 		return
 	time_seconds += delta
 	_advance_smoke_zones(delta)
-	_visibility_accumulator += delta
-	if _visibility_accumulator >= _visibility_interval:
-		_visibility_accumulator = fmod(_visibility_accumulator, _visibility_interval)
-		_update_visibility()
-		_update_messenger_interception()
+	_last_seen_accumulator += delta
+	if _last_seen_accumulator >= _last_seen_interval:
+		_last_seen_accumulator = fmod(_last_seen_accumulator, _last_seen_interval)
+		CoreV2VisibilitySystem.prune_last_seen(self)
 	CoreV2EnemyBehaviorSystem.update_enemy_behavior(self, delta)
 	CoreV2EngagementMovementSystem.update_engagement_movement(self, delta)
 	for army_value in armies.values():
 		var army: CoreV2Army = army_value
 		army.advance(delta, self)
 	CoreV2FormationSeparationSystem.update_formation_separation(self, delta)
+	_visibility_accumulator += delta
+	if _visibility_accumulator >= _visibility_interval:
+		_visibility_accumulator = fmod(_visibility_accumulator, _visibility_interval)
+		_update_visibility()
+		_update_messenger_interception()
 	_advance_order_messengers(delta)
 	CoreV2CombatSystem.update_combat(self, delta)
 	_update_objective_control(delta)
 	_update_resolution_state()
+	mark_battle_changed()
 
 
 func get_all_battalions() -> Array:
@@ -321,6 +354,27 @@ func issue_server_brigade_order(
 	if brigade == null:
 		return false
 	return _issue_brigade_order(army, brigade, order_type, target_position, policies)
+
+
+func issue_server_battalion_order(
+		army_id: StringName,
+		battalion_id: StringName,
+		order_type: int,
+		target_position: Vector3,
+		policies: Dictionary = {}
+) -> bool:
+	if phase != CoreV2Types.BattlePhase.ACTIVE:
+		return false
+	var battalion: CoreV2Battalion = get_battalion(battalion_id)
+	if battalion == null or battalion.army_id != army_id:
+		return false
+	var army: CoreV2Army = get_army(army_id)
+	if army == null:
+		return false
+	var brigade: CoreV2Brigade = army.get_brigade(battalion.brigade_id)
+	if brigade == null:
+		return false
+	return _issue_battalion_order(army, brigade, battalion, order_type, target_position, policies)
 
 
 func get_deployment_zone_snapshots() -> Array:
@@ -936,6 +990,54 @@ func _process_issue_brigade_order(command: Dictionary) -> void:
 	_issue_brigade_order(army, brigade, order_type, target_position, policies)
 
 
+func _process_issue_battalion_order(command: Dictionary) -> void:
+	if phase != CoreV2Types.BattlePhase.ACTIVE:
+		return
+	var army: CoreV2Army = get_army(StringName(command.get("army_id", "")))
+	if army == null:
+		return
+	var battalion: CoreV2Battalion = get_battalion(StringName(command.get("battalion_id", "")))
+	if battalion == null or battalion.army_id != army.id:
+		return
+	var brigade: CoreV2Brigade = army.get_brigade(battalion.brigade_id)
+	if brigade == null:
+		return
+	var order_type: int = int(command.get("order_type", CoreV2Types.OrderType.NONE))
+	var target_position: Vector3 = command.get("target_position", battalion.position)
+	var policies: Dictionary = command.get("policies", {})
+	_issue_battalion_order(army, brigade, battalion, order_type, target_position, policies)
+
+
+func _issue_battalion_order(
+		army: CoreV2Army,
+		brigade: CoreV2Brigade,
+		battalion: CoreV2Battalion,
+		order_type: int,
+		raw_target_position: Vector3,
+		policies: Dictionary
+) -> bool:
+	if army.commander_destroyed or brigade.hq_destroyed:
+		_push_event("%s: direct battalion order rejected because command chain is broken." % battalion.display_name)
+		return false
+	var target_position: Vector3 = project_position_to_terrain(raw_target_position)
+	if not map_rect.has_point(Vector2(target_position.x, target_position.z)):
+		return false
+	var order: CoreV2Order = CoreV2Order.create(order_type, target_position, time_seconds, policies)
+	var accepted: bool = brigade.issue_battalion_override(
+		battalion.id,
+		order,
+		policies,
+		self,
+		time_seconds
+	)
+	if accepted:
+		_push_event("%s received direct battalion override: %s." % [
+			battalion.display_name,
+			CoreV2Types.order_type_name(order_type),
+		])
+	return accepted
+
+
 func _issue_brigade_order(
 		army: CoreV2Army,
 		brigade: CoreV2Brigade,
@@ -1029,7 +1131,7 @@ func _process_start_battle(_command: Dictionary) -> void:
 	phase = CoreV2Types.BattlePhase.ACTIVE
 	time_seconds = 0.0
 	_visibility_accumulator = 0.0
-	_update_visibility()
+	CoreV2VisibilitySystem.update_visibility(self)
 	_push_event("Бій розпочато. Сервер перейшов у real-time режим.")
 
 
@@ -1191,13 +1293,16 @@ func _update_objective_control(delta: float) -> void:
 			var controlling_army_id: StringName = presence.keys()[0]
 			if objective.owner_army_id != controlling_army_id:
 				objective.owner_army_id = controlling_army_id
+				mark_rare_world_changed()
 				var controlling_army: CoreV2Army = get_army(controlling_army_id)
 				_push_event("%s взяла під контроль пункт \"%s\"." % [
 					controlling_army.display_name if controlling_army != null else String(controlling_army_id),
 					objective.display_name,
 				])
 		elif presence.size() > 1:
-			objective.owner_army_id = &""
+			if objective.owner_army_id != &"":
+				objective.owner_army_id = &""
+				mark_rare_world_changed()
 
 		if objective.owner_army_id == &"":
 			continue
@@ -1294,4 +1399,4 @@ func _push_event(text: String) -> void:
 
 
 func _update_visibility() -> void:
-	CoreV2VisibilitySystem.update_visibility(self)
+	CoreV2VisibilitySystem.update_visibility_staged(self)

@@ -667,3 +667,56 @@ Load-test 5x10 завершено як тимчасову перевірку і 
 2. Додати командну спадкоємність: призначення нового полководця після втрати армійського штабу і підпорядкування батальйонів сусідній бригаді після втрати штабу.
 3. Додати drift/розсіювання диму за вітром і вплив інтенсивності залпів на щільність smoke zone.
 4. Додати в HUD/debug панель стану AI-наказів: фокус бригади, pending messenger, поточна причина наказу та бойова причина локальної зміни формації.
+
+### Етап: архітектурний refactor server/client, combat composite і battalion-centric rendering
+
+Зроблено цільовий перехід від старого UI-driven snapshot flow і block-centric combat/render contract до більш чистої server-authoritative архітектури.
+
+Зроблено:
+
+- `CoreV2Server` більше не виконує `submit_client_command() -> process_command() -> full snapshot` одразу після кліку. Команда потрапляє в `CoreV2PendingCommandQueue`, валідатор повертає легкий ack, а застосування відбувається лише на наступному simulation tick.
+- Snapshot protocol винесено в `CoreV2SnapshotProtocol`: є `schema_version`, `server_tick`, `snapshot_seq`, `world_revision`, `battle_revision` і окремі типи `bootstrap_static`, `rare_world_delta`, `dynamic_battle_delta`.
+- `CoreV2SnapshotBuilder` розділено на bootstrap static world, rare world delta і dynamic battle delta. Client bridge мержить канали локально, тому view має повний актуальний snapshot, але сервер більше не перебудовує статичний світ на кожен UI click.
+- Visibility тепер має staged update path: повний refresh лишається для старту, а активний цикл оновлює observer armies по черзі і окремо чистить last-seen markers.
+- Додано direct battalion order command. Якщо гравець вибрав батальйон, наказ іде як battalion override; якщо штаб бригади, наказ іде як brigade order.
+- `CoreV2Brigade` тепер веде `detached_battalion_ids`, `frontage_gap_ratio`, `support_penalty`, `line_stretch_ratio`. Battalion override не є безкоштовним RTS micro: бригада бачить відірваний батальйон і отримує структурний штраф лінії.
+- `CoreV2Battalion` отримав composite tactical state: pike core, left/right shot, doctrine, order source, morale/fatigue/disorder/suppression, alignment/front continuity/depth cohesion, terrain distortion, melee commitment.
+- Combat loop у `CoreV2CombatSystem` переведено на `CoreV2CombatEngagement` і `CoreV2BattalionCombatModel`. Втрати тепер розділяються на material loss і functional loss; ranged fire більше б'є по suppression/disorder/cohesion, melee сильніше б'є по material loss і rout pressure.
+- Fire output залежить від shot strength, doctrine, formation, ammo, suppression, smoke, alignment і quality. Melee output залежить від pike integrity, morale/cohesion/fatigue, disorder і formation.
+- Old sprite/block combat path залишений як legacy helper у файлі, але `update_combat()` його більше не викликає. Це дає безпечний rollback point, але бойова істина вже йде через battalion composite.
+- Battalion visualization більше не залежить від fixed 50-man block arrays у snapshot. `CoreV2BattlefieldView` рендерить один battalion primary visual entity як footprint-масу з presentation-only pike/shot submeshes, driven by `visual_state`.
+- Старі MultiMesh/sprite helper-и у view залишені як disabled optional legacy path, але normal sync не створює soldier/block actors і performance monitor показує battalion footprints замість sprite blocks/unit models.
+
+Рішення:
+
+- authoritative tactical unit лишається battalion;
+- composite pike/shot state не стає окремими network entities;
+- visual layer не впливає на combat correctness;
+- formation offsets ще використовуються як внутрішній layout/footprint helper, але більше не є snapshot/render contract і не є бойовим carrier;
+- `legacy_sprite_blocks_enabled` вимкнено за замовчуванням, тому старі `CoreV2SpriteBlock` об'єкти не створюються у нормальному серверному циклі.
+
+### Етап: тактичний контакт, маса батальйону і посилення бою
+
+Після перевірки візуалу стало очевидно, що battalion-centric rendering був архітектурно правильним, але виглядав як жорсткі прямокутні плити. Цей етап не повертає нас до per-soldier або company-level симуляції: авторитетною бойовою одиницею лишається батальйон, а нові візуальні деформації є лише presentation-only відображенням доменного стану.
+
+Зроблено:
+
+- `CoreV2Battalion` отримав тактичний contact-state: `is_in_contact`, `contact_frontage_ratio`, `compression_level`, `contact_pressure`, `recoil_tendency`, `locked_in_melee` та список опонентів контакту;
+- рух батальйону тепер гальмується станом фронтового тиску: при русі в тиск або locked melee швидкість різко падає, замість того щоб батальйон продовжував їхати крізь ворога;
+- `CoreV2FormationSeparationSystem` більше не розв'язує ворожий контакт як постійне box-push відштовхування. Фронтовий контакт реєструє тиск, компресію, contest score і recoil; аварійний push лишився тільки для грубого нефронтового interpenetration;
+- friendly friction застосовується і для батальйонів однієї бригади, щоб вони не могли безкоштовно проходити один крізь одного;
+- `CoreV2BattalionCombatModel` прив'язав terrain/contact/movement strain до alignment, front continuity, depth cohesion, fire output, melee output, staying power і maneuver power;
+- fire doctrine може деградувати до `IRREGULAR_FIRE`, якщо suppression, disorder, terrain distortion, contact pressure і втрата alignment перевищують можливості drill quality;
+- ranged combat отримав stronger casualty conversion, deterministic casualty carry і помітнішу functional damage: suppression, cohesion loss, morale loss, disorder і alignment loss;
+- melee combat отримав більший діапазон контакту, impact multiplier, pressure ratio, breakthrough threshold, recoil state і значно сильніший functional shock;
+- rout check тепер враховує не лише втрати маси, а й collapse-поведінку: низька мораль, високий disorder і recoil tendency;
+- `CoreV2BattlefieldView` замінив плоскі BoxMesh-прямокутники батальйонів на cached irregular footprint prism mesh з окремими pike/shot sub-zones у межах одного battalion visual entity;
+- smoke marker лишився простим 3D-об'єктом, але тепер прив'язаний до battalion visual state, а не до важких particle-процедур;
+- HUD показує contact pressure/compression/frontage/recoil для вибраного батальйону, щоб можна було швидше перевіряти контактну модель.
+
+Рішення:
+
+- combat correctness не залежить від візуального mesh, його scale або child nodes;
+- нові visual irregularity/compression/smoke є похідними від snapshot `visual_state`;
+- контакт тепер описує стан людської маси під тиском, а не фізичну коробку, яку треба постійно виштовхувати;
+- наступна якісна перевірка має бути в Godot runtime: подивитися чи не треба зменшити/підняти `FIRE_CASUALTY_CONVERSION`, `MELEE_CASUALTY_CONVERSION_PER_SECOND`, recoil amount і visual irregularity buckets під фактичний FPS та читабельність бою.

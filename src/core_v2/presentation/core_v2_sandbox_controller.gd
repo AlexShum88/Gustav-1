@@ -93,16 +93,10 @@ func _handle_left_click(screen_position: Vector2) -> void:
 		return
 	if _pending_order_type != CoreV2Types.OrderType.NONE:
 		var selected_unit: Dictionary = _get_selected_unit_snapshot()
-		var selected_brigade_id: String = _get_selected_order_brigade_id(selected_unit)
-		if selected_brigade_id.is_empty():
+		var order_command: Dictionary = _build_selected_order_command(selected_unit, ground_point)
+		if order_command.is_empty():
 			return
-		_client.submit_ui_command({
-			"command_type": CoreV2Types.CommandType.ISSUE_BRIGADE_ORDER,
-			"brigade_id": selected_brigade_id,
-			"order_type": _pending_order_type,
-			"target_position": ground_point,
-			"policies": _pending_policies.duplicate(true),
-		})
+		_client.submit_ui_command(order_command)
 		_pending_order_type = CoreV2Types.OrderType.NONE
 		_refresh_views()
 		return
@@ -138,6 +132,30 @@ func _get_selected_order_brigade_id(selected_unit: Dictionary) -> String:
 	if entity_kind == CoreV2Types.EntityKind.BATTALION or entity_kind == CoreV2Types.EntityKind.BRIGADE_HQ:
 		return String(selected_unit.get("brigade_id", ""))
 	return ""
+
+
+func _build_selected_order_command(selected_unit: Dictionary, ground_point: Vector3) -> Dictionary:
+	if selected_unit.is_empty() or not bool(selected_unit.get("is_friendly", false)):
+		return {}
+	var entity_kind: int = int(selected_unit.get("entity_kind", _selected_entity_kind))
+	if entity_kind == CoreV2Types.EntityKind.BATTALION:
+		return {
+			"command_type": CoreV2Types.CommandType.ISSUE_BATTALION_ORDER,
+			"battalion_id": String(selected_unit.get("id", _selected_entity_id)),
+			"order_type": _pending_order_type,
+			"target_position": ground_point,
+			"policies": _pending_policies.duplicate(true),
+		}
+	var selected_brigade_id: String = _get_selected_order_brigade_id(selected_unit)
+	if selected_brigade_id.is_empty():
+		return {}
+	return {
+		"command_type": CoreV2Types.CommandType.ISSUE_BRIGADE_ORDER,
+		"brigade_id": selected_brigade_id,
+		"order_type": _pending_order_type,
+		"target_position": ground_point,
+		"policies": _pending_policies.duplicate(true),
+	}
 
 
 func _on_snapshot_updated(snapshot: Dictionary) -> void:

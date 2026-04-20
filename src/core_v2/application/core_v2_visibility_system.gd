@@ -36,16 +36,23 @@ static func update_visibility(state: CoreV2BattleState) -> void:
 	var next_visible_by_army: Dictionary = {}
 	for observer_army_value in state.armies.values():
 		var observer_army: CoreV2Army = observer_army_value
-		var visible_keys: Dictionary = {}
-		_add_friendly_entities(observer_army, visible_keys)
-		for target_army_value in state.armies.values():
-			var target_army: CoreV2Army = target_army_value
-			if target_army.id == observer_army.id:
-				continue
-			_add_visible_enemy_entities(state, observer_army, target_army, visible_keys)
-		next_visible_by_army[observer_army.id] = visible_keys
+		next_visible_by_army[observer_army.id] = _build_visible_keys_for_observer(state, observer_army)
 
 	state.visible_entity_keys_by_army = next_visible_by_army
+	_prune_expired_last_seen(state)
+
+
+static func update_visibility_staged(state: CoreV2BattleState) -> void:
+	if state == null or state.armies.is_empty():
+		return
+	var army_ids: Array = state.armies.keys()
+	var cursor: int = int(state._visibility_observer_cursor) % army_ids.size()
+	var observer_army: CoreV2Army = state.armies[army_ids[cursor]]
+	state.visible_entity_keys_by_army[observer_army.id] = _build_visible_keys_for_observer(state, observer_army)
+	state._visibility_observer_cursor = (cursor + 1) % army_ids.size()
+
+
+static func prune_last_seen(state: CoreV2BattleState) -> void:
 	_prune_expired_last_seen(state)
 
 
@@ -66,6 +73,17 @@ static func build_last_seen_markers(state: CoreV2BattleState, observer_army_id: 
 		marker_snapshot["seconds_ago"] = seconds_ago
 		result.append(marker_snapshot)
 	return result
+
+
+static func _build_visible_keys_for_observer(state: CoreV2BattleState, observer_army: CoreV2Army) -> Dictionary:
+	var visible_keys: Dictionary = {}
+	_add_friendly_entities(observer_army, visible_keys)
+	for target_army_value in state.armies.values():
+		var target_army: CoreV2Army = target_army_value
+		if target_army.id == observer_army.id:
+			continue
+		_add_visible_enemy_entities(state, observer_army, target_army, visible_keys)
+	return visible_keys
 
 
 static func _add_friendly_entities(army: CoreV2Army, visible_keys: Dictionary) -> void:

@@ -18,8 +18,8 @@ const PRESSURE_WITHDRAWAL_COHESION_LOSS_PER_SECOND: float = 0.012
 const RETREAT_COHESION_LOSS_PER_SECOND: float = 0.018
 const SMOKE_ASSAULT_DENSITY: float = 0.42
 const SMOKE_TARGET_SWITCH_DENSITY: float = 0.52
-const INFANTRY_MELEE_CONTACT_RANGE_M: float = 24.0
-const CAVALRY_MELEE_CONTACT_RANGE_M: float = 34.0
+const INFANTRY_MELEE_CONTACT_RANGE_M: float = 95.0
+const CAVALRY_MELEE_CONTACT_RANGE_M: float = 120.0
 const TARGET_LOCK_SECONDS: float = 2.8
 const TARGET_SWITCH_SCORE_MARGIN_M: float = 135.0
 const FORMATION_DECISION_COOLDOWN_SECONDS: float = 5.5
@@ -226,21 +226,7 @@ static func _should_force_melee_role(battalion: CoreV2Battalion, distance_m: flo
 
 
 static func _resolve_melee_power(battalion: CoreV2Battalion) -> float:
-	battalion.ensure_formation_ready()
-	if battalion.category == CoreV2Types.UnitCategory.CAVALRY:
-		return float(max(1, battalion.sprite_count)) * 1.45 * battalion.cohesion * battalion.training
-	if battalion.category == CoreV2Types.UnitCategory.ARTILLERY:
-		return float(max(1, battalion.sprite_count)) * 0.32 * battalion.cohesion
-	var power: float = 0.0
-	for role_value in battalion.sprite_roles:
-		var role: String = String(role_value)
-		if role == "pikeman":
-			power += 1.25
-		elif role == "mixed":
-			power += 0.92
-		else:
-			power += 0.38
-	return power * battalion.cohesion * battalion.training
+	return CoreV2BattalionCombatModel.resolve_melee_output(battalion)
 
 
 static func _get_fire_standoff_m(battalion: CoreV2Battalion) -> float:
@@ -412,7 +398,7 @@ static func _clear_engagement_maneuver(battalion: CoreV2Battalion) -> void:
 
 
 static func _is_unable_to_maneuver(battalion: CoreV2Battalion) -> bool:
-	return battalion == null or battalion.status == CoreV2Types.UnitStatus.ROUTING or battalion.soldiers_total <= 0 or battalion.sprite_count <= 0
+	return battalion == null or battalion.status == CoreV2Types.UnitStatus.ROUTING or battalion.soldiers_total <= 0
 
 
 static func _advance_engagement_timers(battalion: CoreV2Battalion, delta: float) -> void:
