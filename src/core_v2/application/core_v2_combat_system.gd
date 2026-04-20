@@ -29,9 +29,9 @@ const PREVIOUS_TARGET_SCORE_BONUS_M: float = 70.0
 const MIN_TARGET_SEARCH_RADIUS_M: float = 120.0
 const TARGET_SEARCH_RADIUS_PER_SPRITE_M: float = 5.5
 const FIRE_CASUALTY_CONVERSION: float = 0.118
-const MELEE_CASUALTY_CONVERSION_PER_SECOND: float = 0.034
-const MELEE_IMPACT_SHOCK_MULTIPLIER: float = 1.65
-const MELEE_BREAKTHROUGH_RATIO: float = 1.38
+const MELEE_CASUALTY_CONVERSION_PER_SECOND: float = 0.046
+const MELEE_IMPACT_SHOCK_MULTIPLIER: float = 1.85
+const MELEE_BREAKTHROUGH_RATIO: float = 1.30
 
 
 static func update_combat(state: CoreV2BattleState, delta: float) -> void:
@@ -200,7 +200,7 @@ static func _resolve_ranged_exchange(
 	var expected_casualties: float = fire_output * range_factor * terrain_cover * formation_vulnerability * smoke_factor * frontage_factor * FIRE_CASUALTY_CONVERSION
 	expected_casualties *= _seeded_rng_factor(attacker, defender, state, "fire")
 	var casualties: int = _resolve_casualties_with_carry(defender, expected_casualties, false, _seeded_fraction(attacker, defender, state, "fire_round"))
-	var pressure: float = clamp(expected_casualties / max(1.0, float(defender.soldiers_total)) * 7.8 + range_factor * frontage_factor * 0.018, 0.0, 0.16)
+	var pressure: float = clamp(expected_casualties / max(1.0, float(defender.soldiers_total)) * 9.2 + range_factor * frontage_factor * 0.026, 0.0, 0.20)
 	_apply_composite_damage(state, attacker, defender, max(0, casualties), false, {
 		"cohesion_loss": pressure * 0.92,
 		"morale_loss": pressure * 0.46,
@@ -251,7 +251,7 @@ static func _resolve_assault_or_melee(
 	var expected_casualties: float = melee_pressure * clamp(pressure_ratio, 0.45, 2.35) * MELEE_CASUALTY_CONVERSION_PER_SECOND * delta * impact_multiplier
 	expected_casualties *= _seeded_rng_factor(attacker, defender, state, "melee")
 	var casualties: int = _resolve_casualties_with_carry(defender, expected_casualties, true, _seeded_fraction(attacker, defender, state, "melee_round"))
-	var functional_scale: float = clamp((0.055 + pressure_ratio * 0.09 + attacker.contact_pressure * 0.045) * delta * impact_multiplier, 0.0, 0.22)
+	var functional_scale: float = clamp((0.070 + pressure_ratio * 0.115 + attacker.contact_pressure * 0.060 + defender.compression_level * 0.045) * delta * impact_multiplier, 0.0, 0.32)
 	_apply_composite_damage(state, attacker, defender, max(0, casualties), true, {
 		"cohesion_loss": functional_scale * 1.75,
 		"morale_loss": functional_scale * 1.32,
@@ -259,10 +259,14 @@ static func _resolve_assault_or_melee(
 		"disorder_gain": functional_scale * 2.05,
 		"alignment_loss": functional_scale * 1.55,
 	})
+	defender.recoil_tendency = max(
+		defender.recoil_tendency,
+		clamp((pressure_ratio - 0.82) * 0.28 + attacker.contact_pressure * 0.18 + defender.compression_level * 0.16, 0.0, 1.0)
+	)
 	if pressure_ratio >= MELEE_BREAKTHROUGH_RATIO:
 		attacker.melee_commitment_state = CoreV2Types.MeleeCommitmentState.BREAKTHROUGH
 		defender.melee_commitment_state = CoreV2Types.MeleeCommitmentState.RECOIL
-		defender.recoil_tendency = max(defender.recoil_tendency, clamp((pressure_ratio - 1.0) * 0.55, 0.0, 1.0))
+		defender.recoil_tendency = max(defender.recoil_tendency, clamp((pressure_ratio - 1.0) * 0.65, 0.0, 1.0))
 	else:
 		attacker.melee_commitment_state = CoreV2Types.MeleeCommitmentState.PRESS
 	_set_composite_combat_summary(attacker, defender, engagement, "melee", true)
@@ -303,7 +307,7 @@ static func _set_composite_combat_summary(attacker: CoreV2Battalion, defender: C
 	attacker.combat_cooldown_seconds = attacker.reload_cycle_state
 	attacker.combat_reload_seconds = _resolve_reload_seconds(attacker)
 	attacker.combat_attack_kind = attack_kind
-	attacker.combat_melee_blocks = 1 if is_melee else 0
+	attacker.combat_melee_pressure = clamp(attacker.contact_pressure + (0.55 if is_melee else 0.0), 0.0, 1.0)
 	if attacker.status != CoreV2Types.UnitStatus.ROUTING:
 		attacker.status = CoreV2Types.UnitStatus.ENGAGING
 
@@ -820,7 +824,7 @@ static func _clear_combat_summary_only(battalion: CoreV2Battalion) -> void:
 	battalion.combat_cooldown_seconds = 0.0
 	battalion.combat_reload_seconds = 0.0
 	battalion.combat_attack_kind = ""
-	battalion.combat_melee_blocks = 0
+	battalion.combat_melee_pressure = 0.0
 	if battalion.status == CoreV2Types.UnitStatus.ENGAGING:
 		battalion.status = CoreV2Types.UnitStatus.MOVING if not battalion.movement_path.is_empty() else CoreV2Types.UnitStatus.IDLE
 

@@ -15,20 +15,11 @@ const TERRAIN_OVERLAY_HEIGHT_OFFSET_M: float = 0.85
 const DEPLOYMENT_ZONE_HEIGHT_OFFSET_M: float = 1.2
 const TERRAIN_HEIGHT_FADE_MIN_M: float = 160.0
 const TERRAIN_HEIGHT_FADE_MAX_M: float = 760.0
-const INFANTRY_MODEL_SOLDIERS_PER_BLOCK: int = 50
-const INFANTRY_MODEL_COLUMNS: int = 8
-const INFANTRY_MODEL_SPACING_M: float = 1.05
-const INFANTRY_MODEL_SCALE: float = 4.2
-const CLIENT_FORMATION_SPEED_SHARE: float = 0.55
-const CLIENT_FORMATION_MIN_SPEED_MPS: float = 2.5
-const CLIENT_FORMATION_MAX_SPEED_MPS: float = 14.0
-const CLIENT_FORMATION_MAX_DURATION_SECONDS: float = 8.0
-const CLIENT_MOVEMENT_REAR_LAG_M: float = 14.0
-const CLIENT_MOVEMENT_FLANK_BEND_M: float = 9.0
-const CLIENT_PRESSURE_DEFORMATION_M: float = 18.0
-const CLIENT_COMBAT_DISORDER_M: float = 7.0
-const MUSKETEER_MODEL_PATH: String = "res://assets/core_v2/units/musketeer_lowpoly.obj"
-const PIKEMAN_MODEL_PATH: String = "res://assets/core_v2/units/pikeman_lowpoly.obj"
+const VISUAL_CUE_MODEL_SCALE: float = 5.8
+const VISUAL_CUE_ROW_SPACING_M: float = 8.0
+const VISUAL_CUE_COLUMN_SPACING_M: float = 9.5
+const MUSKETEER_VISUAL_RESOURCE_PATH: String = "res://assets/core_v2/units/musketeer_lowpoly.obj"
+const PIKEMAN_VISUAL_RESOURCE_PATH: String = "res://assets/core_v2/units/pikeman_lowpoly.obj"
 const UNIT_ATLAS_PATH: String = "res://assets/core_v2/units/army_atlas.png"
 
 var _ground_root: Node3D
@@ -71,8 +62,6 @@ var _order_line_visuals: Dictionary = {}
 var _messenger_visuals: Dictionary = {}
 var _last_seen_visuals: Dictionary = {}
 var _battalion_visuals: Dictionary = {}
-var _sprite_block_pool: Array = []
-var _sprite_blocks_created: int = 0
 var _last_snapshot_usec: int = 0
 var _visual_interpolation_duration: float = VISUAL_INTERPOLATION_MIN_SECONDS
 var _selected_brigade_id: StringName = &""
@@ -404,16 +393,12 @@ func _rebuild_dynamic_world(snapshot: Dictionary) -> void:
 	_performance_stats["hq_nodes"] = hq_count
 	_performance_stats["battalion_nodes"] = battalion_count
 	_performance_stats["battalion_footprints"] = visual_footprint_count
-	_performance_stats["sprite_blocks"] = 0
-	_performance_stats["unit_model_instances"] = 0
-	_performance_stats["unit_multimeshes"] = _count_unit_multimeshes()
+	_performance_stats["formation_cue_multimeshes"] = _count_visual_cue_multimeshes()
 	_performance_stats["route_waypoints"] = route_waypoint_count
 	_performance_stats["order_messengers"] = messenger_count
 	_performance_stats["last_seen_markers"] = last_seen_count
 	_performance_stats["material_cache"] = _material_cache.size() + _unit_material_cache.size()
 	_performance_stats["mesh_cache"] = _box_mesh_cache.size() + _formation_mesh_cache.size() + _cylinder_mesh_cache.size() + _sphere_mesh_cache.size() + _unit_mesh_cache.size()
-	_performance_stats["sprite_pool"] = _sprite_block_pool.size()
-	_performance_stats["sprite_blocks_created"] = _sprite_blocks_created
 	_performance_stats["battalion_visuals"] = _battalion_visuals.size()
 	_performance_stats["objective_visuals"] = _objective_visuals.size()
 	_performance_stats["smoke_visuals"] = _smoke_visuals.size()
@@ -832,14 +817,13 @@ func _create_battalion_visual(battalion_id: StringName) -> Dictionary:
 	return {
 		"root": root,
 		"label": label,
-		"fallback_marker": null,
 		"mass_marker": null,
 		"pike_marker": null,
 		"shot_left_marker": null,
 		"shot_right_marker": null,
 		"smoke_marker": null,
-		"sprites": [],
-		"unit_multimeshes": {},
+		"pressure_marker": null,
+		"cue_multimeshes": {},
 		"from_position": Vector3.ZERO,
 		"target_position": Vector3.ZERO,
 		"position_elapsed": 0.0,
@@ -848,18 +832,10 @@ func _create_battalion_visual(battalion_id: StringName) -> Dictionary:
 		"target_facing": Vector3.FORWARD,
 		"visual_facing": Vector3.FORWARD,
 		"geometry_signature": 0,
-		"client_block_from_positions": [],
-		"client_block_target_positions": [],
-		"client_block_elapsed": 0.0,
-		"client_block_duration": 0.001,
-		"sprite_from_positions": [],
-		"sprite_target_positions": [],
-		"sprite_elapsed": 0.0,
-		"sprite_duration": 0.001,
-		"unit_from_transforms": {},
-		"unit_target_transforms": {},
-		"unit_elapsed": 0.0,
-		"unit_duration": 0.001,
+		"cue_from_transforms": {},
+		"cue_target_transforms": {},
+		"cue_elapsed": 0.0,
+		"cue_duration": 0.001,
 	}
 
 
@@ -874,171 +850,7 @@ func _sync_battalion_label(visual: Dictionary, battalion_snapshot: Dictionary) -
 
 
 func _build_battalion_geometry_signature(battalion_snapshot: Dictionary) -> int:
-	var pressure_bucket: int = int(round(float(battalion_snapshot.get("formation_pressure_m", 0.0)) / 2.0))
-	var casualties_bucket: int = int(round(float(int(battalion_snapshot.get("recent_casualties_taken", 0))) / 5.0))
-	var terrain_speed_bucket: int = int(round(float(battalion_snapshot.get("terrain_speed_multiplier", 1.0)) * 10.0))
-	var movement_direction: Vector3 = _resolve_snapshot_movement_direction(battalion_snapshot)
-	var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
-	var signature_source: Dictionary = {
-		"formation_state": int(visual_state.get("formation_state", battalion_snapshot.get("formation_state", CoreV2Types.FormationState.LINE))),
-		"frontage_bucket": int(round(float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))) / 4.0)),
-		"depth_bucket": int(round(float(visual_state.get("depth_m", battalion_snapshot.get("formation_depth_m", 48.0))) / 4.0)),
-		"disorder_bucket": int(round(float(visual_state.get("disorder_band", battalion_snapshot.get("disorder", 0.0))) * 10.0)),
-		"smoke_bucket": int(round(float(visual_state.get("smoke_burden", battalion_snapshot.get("smoke_burden", 0.0))) * 10.0)),
-		"pike_bucket": int(round(float(visual_state.get("pike_ratio", battalion_snapshot.get("pike_ratio", 0.35))) * 20.0)),
-		"shot_bucket": int(round(float(visual_state.get("shot_ratio", battalion_snapshot.get("shot_ratio", 0.65))) * 20.0)),
-		"compression_bucket": int(round(float(visual_state.get("compression_level", battalion_snapshot.get("compression_level", 0.0))) * 12.0)),
-		"contact_bucket": int(round(float(visual_state.get("contact_pressure", battalion_snapshot.get("contact_pressure", 0.0))) * 12.0)),
-		"recoil_bucket": int(round(float(visual_state.get("recoil_tendency", battalion_snapshot.get("recoil_tendency", 0.0))) * 10.0)),
-		"status": int(battalion_snapshot.get("status", CoreV2Types.UnitStatus.IDLE)),
-		"movement_x_bucket": int(round(movement_direction.x * 10.0)),
-		"movement_z_bucket": int(round(movement_direction.z * 10.0)),
-		"formation_pressure_direction": battalion_snapshot.get("formation_pressure_direction", Vector3.ZERO),
-		"formation_pressure_bucket": pressure_bucket,
-		"casualties_bucket": casualties_bucket,
-		"terrain_speed_bucket": terrain_speed_bucket,
-	}
-	return signature_source.hash()
-
-
-func _get_snapshot_target_offsets(battalion_snapshot: Dictionary) -> Array:
-	var sprite_target_offsets: Array = battalion_snapshot.get("sprite_target_offsets", [])
-	if not sprite_target_offsets.is_empty():
-		return sprite_target_offsets
-	return battalion_snapshot.get("sprite_offsets", [])
-
-
-func _build_client_visual_offsets(battalion_snapshot: Dictionary) -> Array:
-	var target_offsets: Array = _get_snapshot_target_offsets(battalion_snapshot)
-	if target_offsets.is_empty():
-		return []
-	var visual_offsets: Array = target_offsets.duplicate(true)
-	var facing: Vector3 = _safe_facing(battalion_snapshot.get("facing", Vector3.FORWARD))
-	var movement_direction: Vector3 = _resolve_snapshot_movement_direction(battalion_snapshot)
-	var local_movement_direction: Vector3 = _world_to_local_direction(movement_direction, facing)
-	var pressure_direction: Vector3 = battalion_snapshot.get("formation_pressure_direction", Vector3.ZERO)
-	var local_pressure_direction: Vector3 = _world_to_local_direction(pressure_direction, facing)
-	var pressure_m: float = float(battalion_snapshot.get("formation_pressure_m", 0.0))
-	var combat_disorder: float = _resolve_client_combat_disorder(battalion_snapshot)
-	var metrics: Dictionary = _measure_client_offsets(target_offsets)
-	var looseness: float = clamp(
-		1.15 - float(battalion_snapshot.get("cohesion", 0.8)) * 0.65 - float(battalion_snapshot.get("training", 0.7)) * 0.35,
-		0.22,
-		0.95
-	)
-	for index in range(visual_offsets.size()):
-		var base_offset: Vector3 = target_offsets[index]
-		var offset: Vector3 = visual_offsets[index]
-		if local_movement_direction.length_squared() > 0.001 and int(battalion_snapshot.get("status", CoreV2Types.UnitStatus.IDLE)) == CoreV2Types.UnitStatus.MOVING:
-			var movement: Vector3 = local_movement_direction.normalized()
-			var movement_side := Vector3(-movement.z, 0.0, movement.x).normalized()
-			var radius_m: float = max(1.0, float(metrics.get("radius_m", 10.0)))
-			var rear_factor: float = clamp(-base_offset.dot(movement) / radius_m, 0.0, 1.0)
-			var flank_factor: float = clamp(absf(base_offset.dot(movement_side)) / radius_m, 0.0, 1.0)
-			offset -= movement * (CLIENT_MOVEMENT_REAR_LAG_M * rear_factor + CLIENT_MOVEMENT_FLANK_BEND_M * flank_factor * flank_factor) * looseness
-			offset += movement_side * sin(float(index) * 1.618) * flank_factor * looseness * 1.8
-		if local_pressure_direction.length_squared() > 0.001 and pressure_m > 0.01:
-			var pressure: Vector3 = local_pressure_direction.normalized()
-			var pressure_radius_m: float = max(1.0, float(metrics.get("radius_m", 10.0)))
-			var contact_edge_factor: float = clamp(-base_offset.dot(pressure) / pressure_radius_m, 0.0, 1.0)
-			var pressure_strength: float = clamp(pressure_m / 24.0, 0.0, 1.0)
-			offset += pressure * CLIENT_PRESSURE_DEFORMATION_M * contact_edge_factor * pressure_strength
-			offset += Vector3(-pressure.z, 0.0, pressure.x) * sin(float(index) * 2.31) * pressure_strength * contact_edge_factor * 2.4
-		if combat_disorder > 0.001:
-			offset += Vector3(
-				sin(float(index) * 3.17),
-				0.0,
-				cos(float(index) * 2.73)
-			) * CLIENT_COMBAT_DISORDER_M * combat_disorder * looseness
-		visual_offsets[index] = offset
-	return visual_offsets
-
-
-func _begin_client_block_motion(visual: Dictionary, battalion_snapshot: Dictionary, target_positions: Array, should_snap: bool) -> float:
-	var current_positions: Array = _get_current_client_block_positions(visual, target_positions.size())
-	var max_distance_m: float = 0.0
-	for index in range(min(current_positions.size(), target_positions.size())):
-		var current_position: Vector3 = current_positions[index]
-		var target_position: Vector3 = target_positions[index]
-		max_distance_m = max(max_distance_m, current_position.distance_to(target_position))
-	if should_snap or current_positions.size() != target_positions.size():
-		current_positions = target_positions.duplicate(true)
-		max_distance_m = 0.0
-	var speed_mps: float = _get_client_formation_speed_mps(battalion_snapshot)
-	var duration: float = 0.001 if should_snap else clamp(max_distance_m / max(0.1, speed_mps), _visual_interpolation_duration, CLIENT_FORMATION_MAX_DURATION_SECONDS)
-	visual["client_block_from_positions"] = current_positions
-	visual["client_block_target_positions"] = target_positions.duplicate(true)
-	visual["client_block_elapsed"] = 0.0
-	visual["client_block_duration"] = duration
-	return duration
-
-
-func _get_current_client_block_positions(visual: Dictionary, target_count: int) -> Array:
-	var from_positions: Array = visual.get("client_block_from_positions", [])
-	var target_positions: Array = visual.get("client_block_target_positions", [])
-	if from_positions.size() != target_count or target_positions.size() != target_count:
-		return []
-	var duration: float = max(float(visual.get("client_block_duration", 0.001)), 0.001)
-	var elapsed: float = min(duration, float(visual.get("client_block_elapsed", 0.0)))
-	var t: float = _smoothstep01(elapsed / duration)
-	var result: Array = []
-	for index in range(target_count):
-		var from_position: Vector3 = from_positions[index]
-		var target_position: Vector3 = target_positions[index]
-		result.append(from_position.lerp(target_position, t))
-	return result
-
-
-func _resolve_snapshot_movement_direction(battalion_snapshot: Dictionary) -> Vector3:
-	var position: Vector3 = battalion_snapshot.get("position", Vector3.ZERO)
-	var active_target: Vector3 = battalion_snapshot.get("target_position", position)
-	var movement_path: Array = battalion_snapshot.get("movement_path", [])
-	if not movement_path.is_empty():
-		active_target = movement_path[0]
-	var movement: Vector3 = active_target - position
-	movement.y = 0.0
-	if movement.length_squared() <= 0.001:
-		return Vector3.ZERO
-	return movement.normalized()
-
-
-func _world_to_local_direction(world_direction: Vector3, facing: Vector3) -> Vector3:
-	var flat_direction := Vector3(world_direction.x, 0.0, world_direction.z)
-	if flat_direction.length_squared() <= 0.001:
-		return Vector3.ZERO
-	flat_direction = flat_direction.normalized()
-	var forward: Vector3 = _safe_facing(facing)
-	var side := Vector3(-forward.z, 0.0, forward.x).normalized()
-	return Vector3(flat_direction.dot(side), 0.0, flat_direction.dot(forward))
-
-
-func _measure_client_offsets(offsets: Array) -> Dictionary:
-	var radius_m: float = 10.0
-	for offset_value in offsets:
-		var offset: Vector3 = offset_value
-		radius_m = max(radius_m, Vector2(offset.x, offset.z).length())
-	return {"radius_m": radius_m}
-
-
-func _resolve_client_combat_disorder(battalion_snapshot: Dictionary) -> float:
-	var recent_casualties_taken: int = int(battalion_snapshot.get("recent_casualties_taken", 0))
-	if recent_casualties_taken <= 0:
-		return 0.0
-	var soldiers_total: int = max(1, int(battalion_snapshot.get("soldiers_total", 1)))
-	var shock_scale: float = max(6.0, float(soldiers_total) * 0.018)
-	var casualty_shock: float = clamp(float(recent_casualties_taken) / shock_scale, 0.0, 1.0)
-	var cohesion_multiplier: float = clamp(1.1 - float(battalion_snapshot.get("cohesion", 0.8)), 0.2, 1.0)
-	return casualty_shock * cohesion_multiplier
-
-
-func _get_client_formation_speed_mps(battalion_snapshot: Dictionary) -> float:
-	var move_speed_mps: float = float(battalion_snapshot.get("move_speed_mps", 32.0))
-	var speed_multiplier: float = max(0.1, float(battalion_snapshot.get("terrain_speed_multiplier", 1.0)))
-	var cohesion: float = float(battalion_snapshot.get("cohesion", 0.8))
-	var training: float = float(battalion_snapshot.get("training", 0.7))
-	var discipline: float = clamp((cohesion + training) * 0.5, 0.25, 1.0)
-	var step_speed_mps: float = move_speed_mps * speed_multiplier * CLIENT_FORMATION_SPEED_SHARE * lerp(0.72, 1.08, discipline)
-	return clamp(step_speed_mps, CLIENT_FORMATION_MIN_SPEED_MPS, CLIENT_FORMATION_MAX_SPEED_MPS)
+	return CoreV2BattalionVisualModel.geometry_signature_source(battalion_snapshot).hash()
 
 
 func _sync_battalion_geometry(
@@ -1046,31 +858,25 @@ func _sync_battalion_geometry(
 		battalion_snapshot: Dictionary,
 		should_snap: bool
 ) -> void:
-	_release_visual_sprites(visual)
-	_clear_unit_multimeshes(visual)
-	_remove_fallback_marker(visual)
-	_sync_battalion_mass_visual(visual, battalion_snapshot)
+	_sync_battalion_mass_visual(visual, battalion_snapshot, should_snap)
 
 
-func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Dictionary) -> void:
-	var visual_state: Dictionary = battalion_snapshot.get("visual_state", {})
-	var battalion_color: Color = battalion_snapshot.get("color", Color(1.0, 1.0, 1.0))
-	var frontage_m: float = max(32.0, float(visual_state.get("frontage_m", battalion_snapshot.get("formation_frontage_m", 120.0))))
-	var depth_m: float = max(20.0, float(visual_state.get("depth_m", battalion_snapshot.get("formation_depth_m", 48.0))))
-	var disorder_band: float = clamp(float(visual_state.get("disorder_band", battalion_snapshot.get("disorder", 0.0))), 0.0, 1.0)
-	var smoke_burden: float = clamp(float(visual_state.get("smoke_burden", battalion_snapshot.get("smoke_burden", 0.0))), 0.0, 1.0)
-	var pike_ratio: float = clamp(float(visual_state.get("pike_ratio", battalion_snapshot.get("pike_ratio", 0.35))), 0.0, 1.0)
-	var shot_ratio: float = clamp(float(visual_state.get("shot_ratio", battalion_snapshot.get("shot_ratio", 0.65))), 0.0, 1.0)
-	var compression_level: float = clamp(float(visual_state.get("compression_level", battalion_snapshot.get("compression_level", 0.0))), 0.0, 1.0)
-	var contact_pressure: float = clamp(float(visual_state.get("contact_pressure", battalion_snapshot.get("contact_pressure", 0.0))), 0.0, 1.0)
-	var recoil_tendency: float = clamp(float(visual_state.get("recoil_tendency", battalion_snapshot.get("recoil_tendency", 0.0))), 0.0, 1.0)
-	var terrain_distortion: float = clamp(float(visual_state.get("terrain_distortion", battalion_snapshot.get("terrain_distortion", 0.0))), 0.0, 1.0)
-	var body_height: float = 6.5 + disorder_band * 2.2 + contact_pressure * 1.4
-	var visual_irregularity: float = clamp(disorder_band * 0.58 + terrain_distortion * 0.22 + contact_pressure * 0.28 + recoil_tendency * 0.22, 0.05, 1.0)
-	var distorted_frontage: float = frontage_m * (1.0 + disorder_band * 0.08 - compression_level * 0.06)
-	var distorted_depth: float = depth_m * (1.0 + disorder_band * 0.16 - compression_level * 0.14 + recoil_tendency * 0.08)
-	var mass_color: Color = battalion_color.lerp(Color(0.42, 0.38, 0.31, 1.0), smoke_burden * 0.35).darkened(disorder_band * 0.18)
-	var shape_seed: int = String(battalion_snapshot.get("id", "")).hash()
+func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Dictionary, should_snap: bool) -> void:
+	var model: Dictionary = CoreV2BattalionVisualModel.from_snapshot(battalion_snapshot)
+	var battalion_color: Color = model.get("battalion_color", battalion_snapshot.get("color", Color(1.0, 1.0, 1.0)))
+	var distorted_frontage: float = float(model.get("visual_frontage_m", 120.0))
+	var distorted_depth: float = float(model.get("visual_depth_m", 48.0))
+	var body_height: float = float(model.get("body_height_m", 6.5))
+	var visual_irregularity: float = float(model.get("visual_irregularity", 0.1))
+	var compression_level: float = float(model.get("compression_level", 0.0))
+	var contact_pressure: float = float(model.get("contact_pressure", 0.0))
+	var recoil_tendency: float = float(model.get("recoil_tendency", 0.0))
+	var smoke_burden: float = float(model.get("smoke_burden", 0.0))
+	var smoke_intensity: float = float(model.get("smoke_intensity", 0.0))
+	var pike_ratio: float = float(model.get("pike_ratio", 0.35))
+	var shot_ratio: float = float(model.get("shot_ratio", 0.65))
+	var mass_color: Color = model.get("mass_color", battalion_color)
+	var shape_seed: int = int(model.get("shape_seed", String(battalion_snapshot.get("id", "")).hash()))
 
 	var mass_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "mass_marker", "BattalionMass")
 	mass_marker.mesh = _get_formation_body_mesh(distorted_frontage, body_height, distorted_depth, visual_irregularity, compression_level, contact_pressure, shape_seed)
@@ -1078,17 +884,16 @@ func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Diction
 	mass_marker.material_override = _make_material(Color(mass_color.r, mass_color.g, mass_color.b, 0.72), true, false)
 	mass_marker.visible = true
 
-	var pike_width: float = max(8.0, distorted_frontage * clamp(pike_ratio, 0.12, 0.62))
-	var shot_width_total: float = max(0.0, distorted_frontage - pike_width)
-	var shot_width: float = max(5.0, shot_width_total * 0.5)
-	var sub_height: float = body_height + 1.4
+	var pike_width: float = float(model.get("pike_width_m", max(8.0, distorted_frontage * clamp(pike_ratio, 0.12, 0.62))))
+	var shot_width: float = float(model.get("shot_width_m", max(5.0, max(0.0, distorted_frontage - pike_width) * 0.5)))
+	var sub_height: float = float(model.get("subzone_height_m", body_height + 1.4))
 	var pike_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "pike_marker", "PikeCore")
 	pike_marker.mesh = _get_formation_body_mesh(pike_width, sub_height, distorted_depth * 0.78, visual_irregularity * 0.42, compression_level * 0.35, contact_pressure * 0.45, shape_seed + 17)
 	pike_marker.position = Vector3(0.0, 0.18, 0.0)
 	pike_marker.material_override = _make_material(battalion_color.lightened(0.18), false, false)
 	pike_marker.visible = pike_ratio > 0.03
 
-	var shot_color: Color = battalion_color.darkened(0.12).lerp(Color(0.82, 0.82, 0.76, 1.0), smoke_burden * 0.22)
+	var shot_color: Color = model.get("shot_color", battalion_color.darkened(0.12).lerp(Color(0.82, 0.82, 0.76, 1.0), smoke_burden * 0.22))
 	var left_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "shot_left_marker", "ShotLeft")
 	left_marker.mesh = _get_formation_body_mesh(shot_width, sub_height * 0.82, distorted_depth * 0.9, visual_irregularity * 0.56, compression_level * 0.5, contact_pressure * 0.35, shape_seed + 31)
 	left_marker.position = Vector3(-(pike_width + shot_width) * 0.5, 0.26, 0.0)
@@ -1101,9 +906,17 @@ func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Diction
 	right_marker.material_override = _make_material(shot_color, false, false)
 	right_marker.visible = shot_ratio > 0.03
 
+	var pressure_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "pressure_marker", "PressureBand")
+	var pressure_intensity: float = clamp(max(contact_pressure, recoil_tendency * 0.75), 0.0, 1.0)
+	if pressure_intensity > 0.04:
+		pressure_marker.mesh = _get_formation_body_mesh(distorted_frontage * (0.72 + pressure_intensity * 0.18), 2.4 + pressure_intensity * 3.5, max(8.0, distorted_depth * 0.16), 0.45 + pressure_intensity * 0.45, compression_level, contact_pressure, shape_seed + 73)
+		pressure_marker.position = Vector3(0.0, 0.65, -distorted_depth * 0.50)
+		pressure_marker.material_override = _make_material(Color(1.0, 0.28, 0.10, 0.22 + pressure_intensity * 0.30), true, true)
+		pressure_marker.visible = true
+	else:
+		pressure_marker.visible = false
+
 	var smoke_marker: MeshInstance3D = _get_or_create_battalion_marker(visual, "smoke_marker", "BattalionSmoke")
-	var firing_smoke: float = 0.18 if String(visual_state.get("combat_attack_kind", battalion_snapshot.get("combat_attack_kind", ""))) in ["musket", "artillery"] else 0.0
-	var smoke_intensity: float = clamp(max(smoke_burden, firing_smoke), 0.0, 1.0)
 	if smoke_intensity > 0.03:
 		var smoke_radius: float = max(24.0, distorted_frontage * (0.28 + smoke_intensity * 0.18))
 		var smoke_height: float = 18.0 + smoke_intensity * 28.0
@@ -1113,6 +926,7 @@ func _sync_battalion_mass_visual(visual: Dictionary, battalion_snapshot: Diction
 		smoke_marker.visible = true
 	else:
 		smoke_marker.visible = false
+	_sync_battalion_doctrine_cues(visual, model, battalion_color, should_snap)
 
 
 func _get_or_create_battalion_marker(visual: Dictionary, visual_key: String, marker_name: String) -> MeshInstance3D:
@@ -1127,81 +941,6 @@ func _get_or_create_battalion_marker(visual: Dictionary, visual_key: String, mar
 	return marker
 
 
-func _build_sprite_attack_kind_map(battalion_snapshot: Dictionary) -> Dictionary:
-	var result: Dictionary = {}
-	for block_value in battalion_snapshot.get("sprite_block_targets", []):
-		var block_snapshot: Dictionary = block_value
-		var attack_kind: String = String(block_snapshot.get("attack_kind", ""))
-		if attack_kind.is_empty():
-			continue
-		result[int(block_snapshot.get("index", -1))] = attack_kind
-	return result
-
-
-func _get_sprite_combat_color(role: String, battalion_color: Color, attack_kind: String) -> Color:
-	if attack_kind == "melee":
-		return Color(1.0, 0.24, 0.10, 1.0)
-	return _get_sprite_color(role, battalion_color)
-
-
-func _append_infantry_block_unit_transforms(
-		unit_target_transforms: Dictionary,
-		block_center_local: Vector3,
-		target_facing: Vector3,
-		block_role: String,
-		attack_kind: String
-) -> void:
-	var forward: Vector3 = _safe_facing(target_facing)
-	var side := Vector3(-forward.z, 0.0, forward.x).normalized()
-	var rows: int = int(ceil(float(INFANTRY_MODEL_SOLDIERS_PER_BLOCK) / float(INFANTRY_MODEL_COLUMNS)))
-	for soldier_index in range(INFANTRY_MODEL_SOLDIERS_PER_BLOCK):
-		var model_role: String = _resolve_unit_model_role(block_role, soldier_index)
-		if model_role.is_empty():
-			continue
-		var group_key: String = _get_unit_render_group(model_role, attack_kind)
-		if not unit_target_transforms.has(group_key):
-			unit_target_transforms[group_key] = []
-		var column: int = soldier_index % INFANTRY_MODEL_COLUMNS
-		var row: int = int(floor(float(soldier_index) / float(INFANTRY_MODEL_COLUMNS)))
-		var stagger_x: float = INFANTRY_MODEL_SPACING_M * 0.18 if row % 2 == 1 else 0.0
-		var local_x: float = (float(column) - float(INFANTRY_MODEL_COLUMNS - 1) * 0.5) * INFANTRY_MODEL_SPACING_M + stagger_x
-		var local_z: float = (float(row) - float(rows - 1) * 0.5) * INFANTRY_MODEL_SPACING_M
-		var soldier_position: Vector3 = block_center_local + side * local_x + forward * local_z
-		var soldier_transform := Transform3D(_get_unit_model_basis(forward), soldier_position)
-		unit_target_transforms[group_key].append(soldier_transform)
-
-
-func _can_render_role_with_unit_models(role: String) -> bool:
-	return role == "musketeer" or role == "pikeman" or role == "mixed"
-
-
-func _resolve_unit_model_role(block_role: String, soldier_index: int) -> String:
-	match block_role:
-		"musketeer":
-			return "musketeer"
-		"pikeman":
-			return "pikeman"
-		"mixed":
-			return "pikeman" if soldier_index % 5 < 2 else "musketeer"
-		_:
-			return ""
-
-
-func _get_unit_render_group(model_role: String, attack_kind: String) -> String:
-	return "%s_melee" % model_role if attack_kind == "melee" else model_role
-
-
-func _get_unit_group_model_role(group_key: String) -> String:
-	return group_key.replace("_melee", "")
-
-
-func _get_unit_model_basis(facing: Vector3) -> Basis:
-	var forward: Vector3 = _safe_facing(facing)
-	var side := Vector3(-forward.z, 0.0, forward.x).normalized()
-	var basis := Basis(side, Vector3.UP, forward)
-	return basis.scaled(Vector3.ONE * INFANTRY_MODEL_SCALE)
-
-
 func _get_combat_line_color(battalion_snapshot: Dictionary) -> Color:
 	match String(battalion_snapshot.get("combat_attack_kind", "")):
 		"melee":
@@ -1212,75 +951,66 @@ func _get_combat_line_color(battalion_snapshot: Dictionary) -> Color:
 			return Color(1.0, 0.32, 0.18, 0.86)
 
 
-func _sync_battalion_fallback_marker(visual: Dictionary, battalion_snapshot: Dictionary) -> void:
-	var root: Node3D = visual["root"] as Node3D
-	var marker: MeshInstance3D = visual.get("fallback_marker", null) as MeshInstance3D
-	if marker == null or not is_instance_valid(marker):
-		marker = MeshInstance3D.new()
-		root.add_child(marker)
-		visual["fallback_marker"] = marker
-
-	var category: int = int(battalion_snapshot.get("category", CoreV2Types.UnitCategory.INFANTRY))
-	var mesh := _get_box_mesh(_get_battalion_mesh_size(category))
-	marker.mesh = mesh
-	marker.position = Vector3(0.0, mesh.size.y * 0.5, 0.0)
-	marker.material_override = _make_material(battalion_snapshot.get("color", Color(1.0, 1.0, 1.0)), false, false)
-	marker.visible = true
+func _sync_battalion_doctrine_cues(visual: Dictionary, visual_model: Dictionary, battalion_color: Color, should_snap: bool) -> void:
+	var cue_target_transforms: Dictionary = _build_doctrine_cue_transforms(visual_model)
+	_sync_visual_cue_multimeshes(visual, cue_target_transforms, battalion_color, should_snap)
 
 
-func _remove_fallback_marker(visual: Dictionary) -> void:
-	var marker: MeshInstance3D = visual.get("fallback_marker", null) as MeshInstance3D
-	if marker != null and is_instance_valid(marker):
-		marker.visible = false
+func _build_doctrine_cue_transforms(visual_model: Dictionary) -> Dictionary:
+	var result: Dictionary = {}
+	var pike_count: int = int(visual_model.get("pike_cue_count", 0))
+	var shot_count_per_wing: int = int(visual_model.get("shot_cue_count_per_wing", 0))
+	var frontage_m: float = float(visual_model.get("visual_frontage_m", 120.0))
+	var depth_m: float = float(visual_model.get("visual_depth_m", 48.0))
+	var pike_width_m: float = float(visual_model.get("pike_width_m", frontage_m * 0.36))
+	var shot_width_m: float = float(visual_model.get("shot_width_m", max(5.0, (frontage_m - pike_width_m) * 0.5)))
+	var pressure_state: float = float(visual_model.get("cue_pressure_state", 0.0))
+	var pike_transforms: Array = []
+	var musket_transforms: Array = []
+	_append_cue_grid(pike_transforms, "pikeman", pike_count, 0.0, 0.0, max(18.0, pike_width_m * 0.55), max(18.0, depth_m * 0.52), pressure_state)
+	var wing_offset_x: float = (pike_width_m + shot_width_m) * 0.5
+	_append_cue_grid(musket_transforms, "musketeer", shot_count_per_wing, -wing_offset_x, -depth_m * 0.04, max(14.0, shot_width_m * 0.65), max(16.0, depth_m * 0.64), pressure_state)
+	_append_cue_grid(musket_transforms, "musketeer", shot_count_per_wing, wing_offset_x, -depth_m * 0.04, max(14.0, shot_width_m * 0.65), max(16.0, depth_m * 0.64), pressure_state)
+	if not pike_transforms.is_empty():
+		result["pikeman"] = pike_transforms
+	if not musket_transforms.is_empty():
+		result["musketeer"] = musket_transforms
+	return result
 
 
-func _sync_fallback_sprite_blocks(
+func _append_cue_grid(target_transforms: Array, model_role: String, count: int, center_x: float, center_z: float, width_m: float, depth_m: float, pressure_state: float) -> void:
+	if count <= 0:
+		return
+	var columns: int = int(clamp(ceil(sqrt(float(count)) * width_m / max(1.0, depth_m)), 1.0, float(count)))
+	var rows: int = int(ceil(float(count) / float(columns)))
+	for index in range(count):
+		var column: int = index % columns
+		var row: int = int(floor(float(index) / float(columns)))
+		var column_t: float = (float(column) / max(1.0, float(columns - 1))) - 0.5 if columns > 1 else 0.0
+		var row_t: float = (float(row) / max(1.0, float(rows - 1))) - 0.5 if rows > 1 else 0.0
+		var jitter_x: float = sin(float(index) * 2.371) * (1.0 + pressure_state * 2.0)
+		var jitter_z: float = cos(float(index) * 1.913) * (0.8 + pressure_state * 1.6)
+		var local_position := Vector3(
+			center_x + column_t * width_m + jitter_x,
+			1.4,
+			center_z + row_t * depth_m + jitter_z
+		)
+		target_transforms.append(Transform3D(_get_visual_cue_basis(Vector3.FORWARD), local_position))
+
+
+func _sync_visual_cue_multimeshes(
 		visual: Dictionary,
-		fallback_entries: Array,
+		cue_target_transforms: Dictionary,
 		battalion_color: Color,
-		should_snap: bool,
-		formation_duration: float
+		should_snap: bool
 ) -> void:
-	var existing_sprites: Array = visual.get("sprites", [])
-	var sprite_count_changed: bool = existing_sprites.size() != fallback_entries.size()
-	_ensure_sprite_count(visual, fallback_entries.size())
-	var sprites: Array = visual.get("sprites", [])
-	var from_positions: Array = []
-	var target_positions: Array = []
-	for index in range(fallback_entries.size()):
-		var sprite: MeshInstance3D = sprites[index] as MeshInstance3D
-		var entry: Dictionary = fallback_entries[index]
-		var role: String = String(entry.get("role", "mixed"))
-		var attack_kind: String = String(entry.get("attack_kind", ""))
-		var mesh := _get_box_mesh(_get_sprite_mesh_size(role))
-		sprite.mesh = mesh
-		sprite.material_override = _make_material(_get_sprite_combat_color(role, battalion_color, attack_kind), false, attack_kind == "melee")
-		sprite.visible = true
-		var target_local_position: Vector3 = entry.get("position", Vector3.ZERO) + Vector3(0.0, mesh.size.y * 0.5, 0.0)
-		if should_snap or sprite_count_changed:
-			sprite.position = target_local_position
-		from_positions.append(sprite.position)
-		target_positions.append(target_local_position)
-	visual["sprite_from_positions"] = from_positions
-	visual["sprite_target_positions"] = target_positions
-	visual["sprite_elapsed"] = 0.0
-	visual["sprite_duration"] = 0.001 if should_snap else formation_duration
-
-
-func _sync_unit_multimeshes(
-		visual: Dictionary,
-		unit_target_transforms: Dictionary,
-		battalion_color: Color,
-		should_snap: bool,
-		formation_duration: float
-) -> void:
-	var unit_multimeshes: Dictionary = visual.get("unit_multimeshes", {})
-	var unit_from_transforms: Dictionary = {}
+	var cue_multimeshes: Dictionary = visual.get("cue_multimeshes", {})
+	var cue_from_transforms: Dictionary = {}
 	var normalized_target_transforms: Dictionary = {}
-	for group_key_value in unit_target_transforms.keys():
+	for group_key_value in cue_target_transforms.keys():
 		var group_key: String = String(group_key_value)
-		var target_transforms: Array = unit_target_transforms[group_key]
-		var multimesh_instance: MultiMeshInstance3D = _get_or_create_unit_multimesh_instance(visual, group_key)
+		var target_transforms: Array = cue_target_transforms[group_key]
+		var multimesh_instance: MultiMeshInstance3D = _get_or_create_visual_cue_multimesh_instance(visual, group_key)
 		var multimesh: MultiMesh = multimesh_instance.multimesh
 		var count_changed: bool = multimesh.instance_count != target_transforms.size()
 		var from_transforms: Array = []
@@ -1289,129 +1019,62 @@ func _sync_unit_multimeshes(
 		else:
 			for transform_index in range(target_transforms.size()):
 				from_transforms.append(multimesh.get_instance_transform(transform_index))
-		multimesh.mesh = _get_unit_mesh(_get_unit_group_model_role(group_key))
+		multimesh.mesh = _get_visual_cue_mesh(group_key)
 		multimesh.instance_count = target_transforms.size()
-		multimesh_instance.material_override = _get_unit_material(group_key, battalion_color)
+		multimesh_instance.material_override = _get_visual_cue_material(group_key, battalion_color)
 		multimesh_instance.visible = target_transforms.size() > 0
 		if should_snap or count_changed:
 			for transform_index in range(target_transforms.size()):
 				multimesh.set_instance_transform(transform_index, target_transforms[transform_index])
-		unit_from_transforms[group_key] = from_transforms
+		cue_from_transforms[group_key] = from_transforms
 		normalized_target_transforms[group_key] = target_transforms
 
-	for group_key_value in unit_multimeshes.keys():
+	for group_key_value in cue_multimeshes.keys():
 		var existing_group_key: String = String(group_key_value)
-		if unit_target_transforms.has(existing_group_key):
+		if cue_target_transforms.has(existing_group_key):
 			continue
-		var stale_instance: MultiMeshInstance3D = unit_multimeshes[existing_group_key] as MultiMeshInstance3D
+		var stale_instance: MultiMeshInstance3D = cue_multimeshes[existing_group_key] as MultiMeshInstance3D
 		if stale_instance == null or not is_instance_valid(stale_instance) or stale_instance.multimesh == null:
 			continue
 		stale_instance.multimesh.instance_count = 0
 		stale_instance.visible = false
 
-	visual["unit_from_transforms"] = unit_from_transforms
-	visual["unit_target_transforms"] = normalized_target_transforms
-	visual["unit_elapsed"] = 0.0
-	visual["unit_duration"] = 0.001 if should_snap else formation_duration
+	visual["cue_from_transforms"] = cue_from_transforms
+	visual["cue_target_transforms"] = normalized_target_transforms
+	visual["cue_elapsed"] = 0.0
+	visual["cue_duration"] = 0.001 if should_snap else _visual_interpolation_duration
 
 
-func _get_or_create_unit_multimesh_instance(visual: Dictionary, group_key: String) -> MultiMeshInstance3D:
-	var unit_multimeshes: Dictionary = visual.get("unit_multimeshes", {})
-	if unit_multimeshes.has(group_key):
-		var existing_instance: MultiMeshInstance3D = unit_multimeshes[group_key] as MultiMeshInstance3D
+func _get_or_create_visual_cue_multimesh_instance(visual: Dictionary, group_key: String) -> MultiMeshInstance3D:
+	var cue_multimeshes: Dictionary = visual.get("cue_multimeshes", {})
+	if cue_multimeshes.has(group_key):
+		var existing_instance: MultiMeshInstance3D = cue_multimeshes[group_key] as MultiMeshInstance3D
 		if existing_instance != null and is_instance_valid(existing_instance):
 			return existing_instance
 	var root: Node3D = visual["root"] as Node3D
 	var multimesh_instance := MultiMeshInstance3D.new()
-	multimesh_instance.name = "UnitMultiMesh_%s" % group_key
+	multimesh_instance.name = "DoctrineCue_%s" % group_key
 	var multimesh := MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = _get_unit_mesh(_get_unit_group_model_role(group_key))
+	multimesh.mesh = _get_visual_cue_mesh(group_key)
 	multimesh.instance_count = 0
 	multimesh_instance.multimesh = multimesh
 	root.add_child(multimesh_instance)
-	unit_multimeshes[group_key] = multimesh_instance
-	visual["unit_multimeshes"] = unit_multimeshes
+	cue_multimeshes[group_key] = multimesh_instance
+	visual["cue_multimeshes"] = cue_multimeshes
 	return multimesh_instance
 
 
-func _clear_unit_multimeshes(visual: Dictionary) -> void:
-	var unit_multimeshes: Dictionary = visual.get("unit_multimeshes", {})
-	for multimesh_value in unit_multimeshes.values():
-		var multimesh_instance: MultiMeshInstance3D = multimesh_value as MultiMeshInstance3D
-		if multimesh_instance == null or not is_instance_valid(multimesh_instance) or multimesh_instance.multimesh == null:
-			continue
-		multimesh_instance.multimesh.instance_count = 0
-		multimesh_instance.visible = false
-	visual["unit_from_transforms"] = {}
-	visual["unit_target_transforms"] = {}
-
-
-func _count_unit_model_instances(battalion_snapshot: Dictionary) -> int:
-	var sprite_offsets: Array = _get_snapshot_target_offsets(battalion_snapshot)
-	var sprite_roles: Array = battalion_snapshot.get("sprite_roles", [])
-	var result: int = 0
-	for index in range(sprite_offsets.size()):
-		var role: String = String(sprite_roles[index]) if index < sprite_roles.size() else "mixed"
-		if _can_render_role_with_unit_models(role):
-			result += INFANTRY_MODEL_SOLDIERS_PER_BLOCK
-	return result
-
-
-func _count_unit_multimeshes() -> int:
+func _count_visual_cue_multimeshes() -> int:
 	var result: int = 0
 	for visual_value in _battalion_visuals.values():
 		var visual: Dictionary = visual_value
-		var unit_multimeshes: Dictionary = visual.get("unit_multimeshes", {})
-		for multimesh_value in unit_multimeshes.values():
+		var cue_multimeshes: Dictionary = visual.get("cue_multimeshes", {})
+		for multimesh_value in cue_multimeshes.values():
 			var multimesh_instance: MultiMeshInstance3D = multimesh_value as MultiMeshInstance3D
 			if multimesh_instance != null and is_instance_valid(multimesh_instance) and multimesh_instance.visible:
 				result += 1
 	return result
-
-
-func _ensure_sprite_count(visual: Dictionary, sprite_count: int) -> void:
-	var root: Node3D = visual["root"] as Node3D
-	var sprites: Array = visual.get("sprites", [])
-	while sprites.size() < sprite_count:
-		var sprite := _acquire_sprite_block()
-		root.add_child(sprite)
-		sprites.append(sprite)
-	while sprites.size() > sprite_count:
-		var sprite: MeshInstance3D = sprites.pop_back() as MeshInstance3D
-		_release_sprite_block(sprite)
-	visual["sprites"] = sprites
-
-
-func _release_visual_sprites(visual: Dictionary) -> void:
-	var sprites: Array = visual.get("sprites", [])
-	for sprite_value in sprites:
-		var sprite: MeshInstance3D = sprite_value as MeshInstance3D
-		_release_sprite_block(sprite)
-	visual["sprites"] = []
-	visual["client_block_from_positions"] = []
-	visual["client_block_target_positions"] = []
-	visual["sprite_from_positions"] = []
-	visual["sprite_target_positions"] = []
-
-
-func _acquire_sprite_block() -> MeshInstance3D:
-	if not _sprite_block_pool.is_empty():
-		var pooled_sprite: MeshInstance3D = _sprite_block_pool.pop_back() as MeshInstance3D
-		pooled_sprite.visible = true
-		return pooled_sprite
-	var sprite := MeshInstance3D.new()
-	_sprite_blocks_created += 1
-	return sprite
-
-
-func _release_sprite_block(sprite: MeshInstance3D) -> void:
-	if sprite == null or not is_instance_valid(sprite):
-		return
-	if sprite.get_parent() != null:
-		sprite.get_parent().remove_child(sprite)
-	sprite.visible = false
-	_sprite_block_pool.append(sprite)
 
 
 func _prune_missing_battalion_visuals(seen_battalion_ids: Dictionary) -> void:
@@ -1420,7 +1083,6 @@ func _prune_missing_battalion_visuals(seen_battalion_ids: Dictionary) -> void:
 		if seen_battalion_ids.has(battalion_id):
 			continue
 		var visual: Dictionary = _battalion_visuals[battalion_id]
-		_release_visual_sprites(visual)
 		var root: Node3D = visual.get("root", null) as Node3D
 		if root != null and is_instance_valid(root):
 			root.queue_free()
@@ -1449,50 +1111,30 @@ func _advance_battalion_visuals(delta: float) -> void:
 		visual["visual_facing"] = next_visual_facing
 		root.basis = _basis_for_facing(next_visual_facing)
 
-		var client_block_duration: float = max(float(visual.get("client_block_duration", 0.001)), 0.001)
-		var client_block_elapsed: float = min(client_block_duration, float(visual.get("client_block_elapsed", 0.0)) + delta)
-		visual["client_block_elapsed"] = client_block_elapsed
-
-		var sprites: Array = visual.get("sprites", [])
-		var from_positions: Array = visual.get("sprite_from_positions", [])
-		var target_positions: Array = visual.get("sprite_target_positions", [])
-		var sprite_duration: float = max(float(visual.get("sprite_duration", 0.001)), 0.001)
-		var sprite_elapsed: float = min(sprite_duration, float(visual.get("sprite_elapsed", 0.0)) + delta)
-		var sprite_t: float = _smoothstep01(sprite_elapsed / sprite_duration)
-		var sprite_limit: int = min(sprites.size(), min(from_positions.size(), target_positions.size()))
-		visual["sprite_elapsed"] = sprite_elapsed
-		for index in range(sprite_limit):
-			var sprite: MeshInstance3D = sprites[index] as MeshInstance3D
-			if sprite == null or not is_instance_valid(sprite):
-				continue
-			var from_sprite_position: Vector3 = from_positions[index]
-			var target_sprite_position: Vector3 = target_positions[index]
-			sprite.position = from_sprite_position.lerp(target_sprite_position, sprite_t)
-
-		var unit_multimeshes: Dictionary = visual.get("unit_multimeshes", {})
-		var unit_from_transforms: Dictionary = visual.get("unit_from_transforms", {})
-		var unit_target_transforms: Dictionary = visual.get("unit_target_transforms", {})
-		var unit_duration: float = max(float(visual.get("unit_duration", 0.001)), 0.001)
-		var previous_unit_elapsed: float = float(visual.get("unit_elapsed", 0.0))
-		var was_unit_complete: bool = previous_unit_elapsed >= unit_duration
-		var unit_elapsed: float = min(unit_duration, previous_unit_elapsed + delta)
-		var unit_t: float = _smoothstep01(unit_elapsed / unit_duration)
-		visual["unit_elapsed"] = unit_elapsed
-		if not was_unit_complete:
-			for group_key_value in unit_multimeshes.keys():
+		var cue_multimeshes: Dictionary = visual.get("cue_multimeshes", {})
+		var cue_from_transforms: Dictionary = visual.get("cue_from_transforms", {})
+		var cue_target_transforms: Dictionary = visual.get("cue_target_transforms", {})
+		var cue_duration: float = max(float(visual.get("cue_duration", 0.001)), 0.001)
+		var previous_cue_elapsed: float = float(visual.get("cue_elapsed", 0.0))
+		var was_cue_complete: bool = previous_cue_elapsed >= cue_duration
+		var cue_elapsed: float = min(cue_duration, previous_cue_elapsed + delta)
+		var cue_t: float = _smoothstep01(cue_elapsed / cue_duration)
+		visual["cue_elapsed"] = cue_elapsed
+		if not was_cue_complete:
+			for group_key_value in cue_multimeshes.keys():
 				var group_key: String = String(group_key_value)
-				var multimesh_instance: MultiMeshInstance3D = unit_multimeshes[group_key] as MultiMeshInstance3D
+				var multimesh_instance: MultiMeshInstance3D = cue_multimeshes[group_key] as MultiMeshInstance3D
 				if multimesh_instance == null or not is_instance_valid(multimesh_instance) or multimesh_instance.multimesh == null:
 					continue
-				var from_transforms: Array = unit_from_transforms.get(group_key, [])
-				var target_transforms: Array = unit_target_transforms.get(group_key, [])
-				var unit_limit: int = min(multimesh_instance.multimesh.instance_count, min(from_transforms.size(), target_transforms.size()))
-				for unit_index in range(unit_limit):
-					var from_transform: Transform3D = from_transforms[unit_index]
-					var target_transform: Transform3D = target_transforms[unit_index]
+				var from_transforms: Array = cue_from_transforms.get(group_key, [])
+				var target_transforms: Array = cue_target_transforms.get(group_key, [])
+				var cue_limit: int = min(multimesh_instance.multimesh.instance_count, min(from_transforms.size(), target_transforms.size()))
+				for cue_index in range(cue_limit):
+					var from_transform: Transform3D = from_transforms[cue_index]
+					var target_transform: Transform3D = target_transforms[cue_index]
 					var next_transform: Transform3D = target_transform
-					next_transform.origin = from_transform.origin.lerp(target_transform.origin, unit_t)
-					multimesh_instance.multimesh.set_instance_transform(unit_index, next_transform)
+					next_transform.origin = from_transform.origin.lerp(target_transform.origin, cue_t)
+					multimesh_instance.multimesh.set_instance_transform(cue_index, next_transform)
 
 		_battalion_visuals[battalion_id] = visual
 
@@ -1928,52 +1570,6 @@ func _create_order_messenger_node(messenger_snapshot: Dictionary) -> Node3D:
 	return root
 
 
-func _create_legacy_battalion_node(battalion_snapshot: Dictionary) -> Node3D:
-	var root := Node3D.new()
-	var position_value: Vector3 = battalion_snapshot.get("position", Vector3.ZERO)
-	root.position = position_value
-	var battalion_color: Color = battalion_snapshot.get("color", Color(1.0, 1.0, 1.0))
-	var sprite_offsets: Array = _get_snapshot_target_offsets(battalion_snapshot)
-	var sprite_roles: Array = battalion_snapshot.get("sprite_roles", [])
-	var facing: Vector3 = battalion_snapshot.get("facing", Vector3.FORWARD)
-
-	if sprite_offsets.is_empty():
-		var marker := MeshInstance3D.new()
-		var category: int = int(battalion_snapshot.get("category", CoreV2Types.UnitCategory.INFANTRY))
-		var mesh := _get_box_mesh(_get_battalion_mesh_size(category))
-		marker.mesh = mesh
-		marker.position.y = mesh.size.y * 0.5
-		marker.material_override = _make_material(battalion_color, false, false)
-		root.add_child(marker)
-	else:
-		for index in range(sprite_offsets.size()):
-			var role: String = String(sprite_roles[index]) if index < sprite_roles.size() else "mixed"
-			var sprite_offset: Vector3 = sprite_offsets[index]
-			root.add_child(_create_legacy_battalion_sprite_node(sprite_offset, role, facing, battalion_color))
-
-	var label := Label3D.new()
-	var reform_suffix: String = " %.0f%%" % (float(battalion_snapshot.get("formation_progress", 1.0)) * 100.0) if bool(battalion_snapshot.get("is_reforming", false)) else ""
-	label.text = "%s\n%s%s" % [
-		String(battalion_snapshot.get("display_name", "Батальйон")),
-		String(battalion_snapshot.get("desired_formation_label", battalion_snapshot.get("formation_label", ""))),
-		reform_suffix,
-	]
-	label.position = Vector3(0.0, 54.0, 0.0)
-	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	root.add_child(label)
-
-	return root
-
-
-func _create_legacy_battalion_sprite_node(local_offset: Vector3, role: String, facing: Vector3, battalion_color: Color) -> Node3D:
-	var marker := MeshInstance3D.new()
-	var mesh := _get_box_mesh(_get_sprite_mesh_size(role))
-	marker.mesh = mesh
-	marker.position = _transform_local_offset(local_offset, facing) + Vector3(0.0, mesh.size.y * 0.5, 0.0)
-	marker.material_override = _make_material(_get_sprite_color(role, battalion_color), false, false)
-	return marker
-
-
 func _create_last_seen_marker_node(marker_snapshot: Dictionary) -> Node3D:
 	var root := Node3D.new()
 	root.position = marker_snapshot.get("position", Vector3.ZERO)
@@ -2197,22 +1793,23 @@ func _get_debug_terrain_type_at(world_position: Vector3) -> int:
 	return terrain_type
 
 
-func _get_battalion_mesh_size(category: int) -> Vector3:
-	match category:
-		CoreV2Types.UnitCategory.CAVALRY:
-			return Vector3(110.0, 14.0, 84.0)
-		CoreV2Types.UnitCategory.ARTILLERY:
-			return Vector3(132.0, 12.0, 92.0)
-		_:
-			return Vector3(150.0, 12.0, 64.0)
+func _get_visual_cue_basis(_facing: Vector3 = Vector3.FORWARD) -> Basis:
+	return Basis.IDENTITY.scaled(Vector3.ONE * VISUAL_CUE_MODEL_SCALE)
 
 
-func _get_sprite_mesh_size(role: String) -> Vector3:
-	match role:
-		"cavalry":
-			return Vector3(8.0, 8.0, 10.0)
-		"artillery":
-			return Vector3(12.0, 8.0, 9.0)
+func _get_visual_cue_mesh(model_role: String) -> Mesh:
+	if _unit_mesh_cache.has(model_role):
+		return _unit_mesh_cache[model_role] as Mesh
+	var model_path: String = MUSKETEER_VISUAL_RESOURCE_PATH if model_role == "musketeer" else PIKEMAN_VISUAL_RESOURCE_PATH
+	var loaded_mesh: Mesh = load(model_path) as Mesh
+	if loaded_mesh == null:
+		loaded_mesh = _get_box_mesh(_get_visual_cue_fallback_size(model_role))
+	_unit_mesh_cache[model_role] = loaded_mesh
+	return loaded_mesh
+
+
+func _get_visual_cue_fallback_size(model_role: String) -> Vector3:
+	match model_role:
 		"pikeman":
 			return Vector3(7.0, 8.0, 8.0)
 		"musketeer":
@@ -2221,44 +1818,25 @@ func _get_sprite_mesh_size(role: String) -> Vector3:
 			return Vector3(8.0, 8.0, 8.0)
 
 
-func _get_sprite_color(role: String, battalion_color: Color) -> Color:
-	match role:
+func _get_visual_cue_color(model_role: String, battalion_color: Color) -> Color:
+	match model_role:
 		"pikeman":
-			return battalion_color.lightened(0.2)
+			return battalion_color.lightened(0.24)
 		"musketeer":
-			return battalion_color.darkened(0.1)
-		"cavalry":
-			return battalion_color.lightened(0.08)
-		"artillery":
-			return Color(0.18, 0.18, 0.16).lerp(battalion_color, 0.35)
+			return battalion_color.darkened(0.12)
 		_:
 			return battalion_color
 
 
-func _get_unit_mesh(model_role: String) -> Mesh:
-	if _unit_mesh_cache.has(model_role):
-		return _unit_mesh_cache[model_role] as Mesh
-	var model_path: String = MUSKETEER_MODEL_PATH if model_role == "musketeer" else PIKEMAN_MODEL_PATH
-	var loaded_mesh: Mesh = load(model_path) as Mesh
-	if loaded_mesh == null:
-		loaded_mesh = _get_box_mesh(_get_sprite_mesh_size(model_role))
-	_unit_mesh_cache[model_role] = loaded_mesh
-	return loaded_mesh
-
-
-func _get_unit_material(group_key: String, battalion_color: Color) -> StandardMaterial3D:
-	var is_melee: bool = group_key.ends_with("_melee")
-	var model_role: String = _get_unit_group_model_role(group_key)
-	var color_value: Color = Color(1.0, 0.24, 0.10, 1.0) if is_melee else _get_sprite_color(model_role, battalion_color)
-	var cache_key: String = "%s:%s" % [group_key, color_value.to_html(true)]
+func _get_visual_cue_material(model_role: String, battalion_color: Color) -> StandardMaterial3D:
+	var color_value: Color = _get_visual_cue_color(model_role, battalion_color)
+	var cache_key: String = "%s:%s" % [model_role, color_value.to_html(true)]
 	if _unit_material_cache.has(cache_key):
 		return _unit_material_cache[cache_key] as StandardMaterial3D
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color_value
 	material.albedo_texture = _get_unit_atlas_texture()
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if is_melee:
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_unit_material_cache[cache_key] = material
 	return material
 
@@ -2268,15 +1846,6 @@ func _get_unit_atlas_texture() -> Texture2D:
 		return _unit_atlas_texture
 	_unit_atlas_texture = load(UNIT_ATLAS_PATH) as Texture2D
 	return _unit_atlas_texture
-
-
-func _transform_local_offset(local_offset: Vector3, facing: Vector3) -> Vector3:
-	var forward: Vector3 = facing
-	if forward.length_squared() <= 0.0001:
-		forward = Vector3.FORWARD
-	forward = forward.normalized()
-	var side := Vector3(-forward.z, 0.0, forward.x).normalized()
-	return side * local_offset.x + Vector3.UP * local_offset.y + forward * local_offset.z
 
 
 func _get_formation_body_mesh(

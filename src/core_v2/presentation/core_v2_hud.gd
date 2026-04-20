@@ -137,7 +137,7 @@ func _build_selection_summary(selected_unit: Dictionary) -> Dictionary:
 
 func _build_battalion_selection_summary(selected_battalion: Dictionary) -> Dictionary:
 	var selection_title: String = String(selected_battalion.get("display_name", "Батальйон"))
-	var selection_body: String = "Армія: %s\nБригада: %s\nСтатус: %s\nФормація: %s -> %s (%.0f%%)\nКомандир: %s\nЧисельність: %d\nСпрайтів: %d\nЗгуртованість: %.0f%%\nБоєприпаси: %.0f%%\nФураж: %.0f%%\nОгляд: %.0f -> %.0f м\nМісцевість: %s h%.0f v%.2f spd%.2f def%+.2f\nНаказ: %s" % [
+	var selection_body: String = "Армія: %s\nБригада: %s\nСтатус: %s\nФормація: %s -> %s (%.0f%%)\nКомандир: %s\nЧисельність: %d\nВидима сила: %d\nЗгуртованість: %.0f%%\nБоєприпаси: %.0f%%\nФураж: %.0f%%\nОгляд: %.0f -> %.0f м\nМісцевість: %s h%.0f v%.2f spd%.2f def%+.2f\nНаказ: %s" % [
 		selected_battalion.get("army_name", ""),
 		selected_battalion.get("brigade_name", ""),
 		selected_battalion.get("status_label", ""),
@@ -299,6 +299,10 @@ func _build_performance_text(performance_stats: Dictionary) -> String:
 		int(performance_stats.get("battalion_footprints", 0)),
 		_get_performance_max_int("battalion_footprints"),
 	])
+	lines.append("Formation cues %d / max %d" % [
+		int(performance_stats.get("formation_cue_multimeshes", 0)),
+		_get_performance_max_int("formation_cue_multimeshes"),
+	])
 	lines.append("Route waypoints %d / max %d" % [
 		int(performance_stats.get("route_waypoints", 0)),
 		_get_performance_max_int("route_waypoints"),
@@ -359,6 +363,7 @@ func _update_performance_extremes(performance_stats: Dictionary, can_record_extr
 		"selection_overlay_rebuilds",
 		"battalion_nodes",
 		"battalion_footprints",
+		"formation_cue_multimeshes",
 		"route_waypoints",
 		"battalion_visuals",
 		"objective_visuals",

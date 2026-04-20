@@ -73,28 +73,31 @@ static func _build_footprints(state: CoreV2BattleState, battalions: Array) -> Di
 
 
 static func _build_footprint(state: CoreV2BattleState, battalion: CoreV2Battalion) -> Dictionary:
-	if battalion.sprite_offsets.is_empty():
-		return {}
-	var min_x: float = INF
-	var max_x: float = -INF
-	var min_z: float = INF
-	var max_z: float = -INF
-	for offset_value in battalion.sprite_offsets:
-		var offset: Vector3 = offset_value
-		min_x = min(min_x, offset.x)
-		max_x = max(max_x, offset.x)
-		min_z = min(min_z, offset.z)
-		max_z = max(max_z, offset.z)
 	var facing: Vector3 = battalion.facing
 	if facing.length_squared() <= 0.0001:
 		facing = Vector3.FORWARD
 	facing = facing.normalized()
 	var side := Vector3(-facing.z, 0.0, facing.x).normalized()
-	var measured_width: float = max(battalion.formation_frontage_m, max_x - min_x)
-	var measured_depth: float = max(battalion.formation_depth_m, max_z - min_z)
+	# Контакт є battalion-level: формаційна геометрія домену є базою, а старі offsets лише уточнюють внутрішній footprint.
+	var measured_width: float = max(24.0, battalion.formation_frontage_m)
+	var measured_depth: float = max(18.0, battalion.formation_depth_m)
+	var local_center := Vector3.ZERO
+	if not battalion.sprite_offsets.is_empty():
+		var min_x: float = INF
+		var max_x: float = -INF
+		var min_z: float = INF
+		var max_z: float = -INF
+		for offset_value in battalion.sprite_offsets:
+			var offset: Vector3 = offset_value
+			min_x = min(min_x, offset.x)
+			max_x = max(max_x, offset.x)
+			min_z = min(min_z, offset.z)
+			max_z = max(max_z, offset.z)
+		measured_width = max(measured_width, max_x - min_x)
+		measured_depth = max(measured_depth, max_z - min_z)
+		local_center = Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
 	var half_width: float = max(FOOTPRINT_PADDING_M, measured_width * 0.5 + FOOTPRINT_PADDING_M)
 	var capsule_radius: float = max(MIN_CAPSULE_RADIUS_M, measured_depth * 0.5 + FOOTPRINT_PADDING_M)
-	var local_center := Vector3((min_x + max_x) * 0.5, 0.0, (min_z + max_z) * 0.5)
 	var center: Vector3 = battalion.position + side * local_center.x + facing * local_center.z
 	center.y = state.get_height_at(center)
 	var start_2d := Vector2(center.x - side.x * half_width, center.z - side.z * half_width)
@@ -275,7 +278,12 @@ static func _resolve_contact_staying_score(state: CoreV2BattleState, battalion: 
 	var staying_power: float = CoreV2BattalionCombatModel.resolve_staying_power(state, battalion)
 	var melee_power: float = CoreV2BattalionCombatModel.resolve_melee_output(battalion)
 	var reform_penalty: float = 0.72 if battalion.is_reforming else 1.0
-	return max(1.0, (staying_power + melee_power * 0.42) * reform_penalty)
+	var order_penalty: float = clamp(
+		1.0 - battalion.terrain_distortion * 0.24 - battalion.movement_strain * 0.18 - battalion.compression_level * 0.12,
+		0.45,
+		1.0
+	)
+	return max(1.0, (staying_power + melee_power * 0.42) * reform_penalty * order_penalty)
 
 
 static func _resolve_battalion_mass(battalion: CoreV2Battalion) -> float:

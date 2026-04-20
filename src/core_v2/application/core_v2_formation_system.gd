@@ -108,7 +108,8 @@ static func advance_battalion(battalion: CoreV2Battalion, delta: float, terrain_
 		initialize_battalion(battalion)
 	_ensure_soft_state(battalion)
 	if battalion.is_reforming:
-		battalion.formation_elapsed_seconds += delta
+		var reform_rate_multiplier: float = _resolve_reform_rate_multiplier(battalion, terrain_state)
+		battalion.formation_elapsed_seconds += delta * reform_rate_multiplier
 		battalion.formation_progress = clamp(
 			battalion.formation_elapsed_seconds / max(battalion.formation_duration_seconds, 0.001),
 			0.0,
@@ -397,6 +398,17 @@ static func _ensure_soft_state(battalion: CoreV2Battalion) -> void:
 		battalion.sprite_target_offsets = layout.get("offsets", []).duplicate(true)
 	if battalion.sprite_reform_from_offsets.size() != battalion.sprite_count:
 		battalion.sprite_reform_from_offsets = battalion.sprite_offsets.duplicate(true)
+
+
+static func _resolve_reform_rate_multiplier(battalion: CoreV2Battalion, terrain_state) -> float:
+	var terrain_speed: float = terrain_state.get_speed_multiplier_at(battalion.position, battalion.category) if terrain_state != null else 1.0
+	# Перешикування великої маси людей сповільнюється на поганому терені та під фронтовим тиском.
+	var condition_factor: float = clamp(
+		1.0 - battalion.disorder * 0.35 - battalion.contact_pressure * 0.45 - battalion.compression_level * 0.30 - battalion.movement_strain * 0.25,
+		0.20,
+		1.0
+	)
+	return clamp(terrain_speed * condition_factor, 0.15, 1.15)
 
 
 static func _resolve_ideal_offsets(battalion: CoreV2Battalion, delta: float) -> Array:
